@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
+import hashlib
 from collections import Counter
 from html import escape
 from datetime import datetime, timedelta, timezone
@@ -620,6 +622,250 @@ def _section_title(title: str, subtitle: str | None = None) -> None:
     st.markdown(f'<div class="ops-section-title">{escape(title)}</div>', unsafe_allow_html=True)
     if subtitle:
         st.markdown(f'<div class="ops-subtitle">{escape(subtitle)}</div>', unsafe_allow_html=True)
+
+
+TRACK_A_COLUMN_CANDIDATES = {
+    "timestamp": ["timestamp", "time", "ts", "epoch", "frame.time_epoch", "frame.time", "capture_time"],
+    "source": ["src", "source", "src_ip", "source_ip", "ip.src", "ipv4_src", "ipv6_src"],
+    "destination": ["dst", "destination", "dst_ip", "dest_ip", "ip.dst", "ipv4_dst", "ipv6_dst"],
+    "src_port": ["src_port", "sport", "tcp.srcport", "source_port", "srcport"],
+    "dst_port": ["dst_port", "dport", "tcp.dstport", "destination_port", "dstport"],
+    "length": ["length", "len", "frame.len", "tcp.len", "packet_len", "payload_len", "packet_size", "size"],
+    "protocol": ["protocol", "proto", "transport", "ip.proto", "layer4"],
+    "seq": ["seq", "tcp.seq", "sequence", "sequence_number", "tcp_seq"],
+    "ack": ["ack", "tcp.ack", "ack_number", "acknowledgment", "tcp_ack"],
+    "flags": ["flags", "tcp.flags", "tcp_flag", "flag"],
+    "payload": ["payload", "data", "tcp.payload", "raw", "payload_hex", "hex_payload"],
+}
+
+
+def _track_a_normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    normalized = df.copy()
+    normalized.columns = [str(col).strip().lower() for col in normalized.columns]
+    return normalized
+
+
+def _track_a_find_column(df: pd.DataFrame, semantic: str) -> str | None:
+    candidates = TRACK_A_COLUMN_CANDIDATES.get(semantic, [])
+    column_map = {col.lower(): col for col in df.columns}
+
+    for candidate in candidates:
+        if candidate in column_map:
+            return column_map[candidate]
+
+    for col in df.columns:
+        compact_col = col.replace("_", "").replace(" ", "").replace(".", "")
+        for candidate in candidates:
+            compact_candidate = candidate.replace("_", "").replace(".", "")
+            if compact_candidate in compact_col:
+                return col
+    return None
+
+
+def _track_a_hash_payload(value: object) -> str:
+    text = "" if value is None else str(value)
+    if not text or text.lower() == "nan":
+        return ""
+    return hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _track_a_coerce_timestamp(series: pd.Series) -> pd.Series:
+    numeric = pd.to_numeric(series, errors="coerce")
+    if numeric.notna().mean() >= 0.7:
+        return numeric
+    parsed = pd.to_datetime(series, errors="coerce", utc=True)
+    return parsed.astype("int64") / 1e9
+
+
+def _track_a_parse_csv(uploaded_file) -> tuple[pd.DataFrame, dict[str, str]]:
+    raw = pd.read_csv(uploaded_file, sep=None, engine="python", low_memory=False)
+    raw = _track_a_normalize_columns(raw)
+
+    mapped: dict[str, str] = {}
+    for semantic in TRACK_A_COLUMN_CANDIDATES:
+        found = _track_a_find_column(raw, semantic)
+        if found:
+            mapped[semantic] = found
+
+    if "protocol" in mapped:
+        proto_series = raw[mapped["protocol"]].astype(str).str.lower()
+        tcp_mask = proto_series.str.contains("tcp") | proto_series.str.contains("6")
+        if tcp_mask.any():
+            raw = raw.loc[tcp_mask].copy()
+
+    out = pd.DataFrame(index=raw.index)
+    out["timestamp"] = _track_a_coerce_timestamp(raw[mapped["timestamp"]]) if "timestamp" in mapped else pd.Series(range(len(raw)), index=raw.index, dtype=float)
+    out["source"] = raw[mapped["source"]].astype(str) if "source" in mapped else "unknown_source"
+    out["destination"] = raw[mapped["destination"]].astype(str) if "destination" in mapped else "unknown_destination"
+    out["src_port"] = pd.to_numeric(raw[mapped["src_port"]], errors="coerce").fillna(-1).astype(int) if "src_port" in mapped else -1
+    out["dst_port"] = pd.to_numeric(raw[mapped["dst_port"]], errors="coerce").fillna(-1).astype(int) if "dst_port" in mapped else -1
+    out["length"] = pd.to_numeric(raw[mapped["length"]], errors="coerce").fillna(0).astype(float) if "length" in mapped else 0.0
+    out["protocol"] = raw[mapped["protocol"]].astype(str) if "protocol" in mapped else "TCP"
+    out["seq"] = pd.to_numeric(raw[mapped["seq"]], errors="coerce").fillna(-1).astype("int64") if "seq" in mapped else -1
+    out["ack"] = pd.to_numeric(raw[mapped["ack"]], errors="coerce").fillna(-1).astype("int64") if "ack" in mapped else -1
+    out["flags"] = raw[mapped["flags"]].astype(str) if "flags" in mapped else ""
+    out["payload_hash"] = raw[mapped["payload"]].map(_track_a_hash_payload) if "payload" in mapped else ""
+    out["source_format"] = "csv"
+
+    mapping_report = {semantic: mapped.get(semantic, "<not_found>") for semantic in TRACK_A_COLUMN_CANDIDATES}
+    return out, mapping_report
+
+
+def _track_a_parse_pcap(uploaded_file) -> tuple[pd.DataFrame, dict[str, str]]:
+    try:
+        from scapy.all import IP, IPv6, TCP, rdpcap  # type: ignore
+    except Exception as exc:
+        raise RuntimeError("PCAP support requires scapy. Install with: py -3 -m pip install scapy") from exc
+
+    suffix = Path(uploaded_file.name).suffix or ".pcap"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(uploaded_file.getvalue())
+        tmp_path = Path(tmp.name)
+
+    rows: list[dict[str, object]] = []
+    try:
+        packets = rdpcap(str(tmp_path))
+        for pkt in packets:
+            if TCP not in pkt:
+                continue
+
+            if IP in pkt:
+                src = pkt[IP].src
+                dst = pkt[IP].dst
+            elif IPv6 in pkt:
+                src = pkt[IPv6].src
+                dst = pkt[IPv6].dst
+            else:
+                src = "unknown_source"
+                dst = "unknown_destination"
+
+            tcp = pkt[TCP]
+            payload_bytes = bytes(tcp.payload) if tcp.payload is not None else b""
+            rows.append(
+                {
+                    "timestamp": float(pkt.time),
+                    "source": src,
+                    "destination": dst,
+                    "src_port": int(getattr(tcp, "sport", -1)),
+                    "dst_port": int(getattr(tcp, "dport", -1)),
+                    "length": float(len(payload_bytes)),
+                    "protocol": "TCP",
+                    "seq": int(getattr(tcp, "seq", -1)),
+                    "ack": int(getattr(tcp, "ack", -1)),
+                    "flags": str(getattr(tcp, "flags", "")),
+                    "payload_hash": hashlib.sha256(payload_bytes).hexdigest() if payload_bytes else "",
+                    "source_format": "pcap",
+                }
+            )
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    if not rows:
+        raise ValueError("No TCP packets found in uploaded PCAP file.")
+
+    mapping_report = {
+        "timestamp": "pcap:packet.time",
+        "source": "pcap:ip.src",
+        "destination": "pcap:ip.dst",
+        "src_port": "pcap:tcp.sport",
+        "dst_port": "pcap:tcp.dport",
+        "length": "pcap:len(tcp.payload)",
+        "protocol": "pcap:TCP only",
+        "seq": "pcap:tcp.seq",
+        "ack": "pcap:tcp.ack",
+        "flags": "pcap:tcp.flags",
+        "payload": "pcap:sha256(tcp.payload)",
+    }
+    return pd.DataFrame(rows), mapping_report
+
+
+def _track_a_parse_uploaded(uploaded_file) -> tuple[pd.DataFrame, dict[str, str]]:
+    suffix = Path(uploaded_file.name).suffix.lower()
+    if suffix in {".pcap", ".pcapng"}:
+        parsed, mapping = _track_a_parse_pcap(uploaded_file)
+    else:
+        parsed, mapping = _track_a_parse_csv(uploaded_file)
+
+    parsed = parsed.dropna(subset=["timestamp"]).copy()
+    parsed["timestamp"] = pd.to_numeric(parsed["timestamp"], errors="coerce")
+    parsed = parsed.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+    if parsed.empty:
+        raise ValueError("Uploaded file has no valid TCP records after parsing.")
+    return parsed, mapping
+
+
+def _track_a_robust_zscore(series: pd.Series) -> pd.Series:
+    median = series.median()
+    mad = (series - median).abs().median()
+    if pd.isna(mad) or mad == 0:
+        return pd.Series([0.0] * len(series), index=series.index)
+    return (series - median) / (1.4826 * mad)
+
+
+def _track_a_detect_anomalies(df: pd.DataFrame) -> pd.DataFrame:
+    analyzed = df.copy().sort_values("timestamp").reset_index(drop=True)
+    analyzed["iat_ms"] = analyzed["timestamp"].diff().fillna(0).clip(lower=0) * 1000.0
+    analyzed["z_iat"] = _track_a_robust_zscore(analyzed["iat_ms"])
+    analyzed["z_len"] = _track_a_robust_zscore(analyzed["length"])
+
+    timing_flag = analyzed["z_iat"].abs() >= 4.0
+    size_flag = analyzed["z_len"].abs() >= 4.0
+    analyzed["is_suspicious"] = timing_flag | size_flag
+    analyzed["suspicion_reason"] = "none"
+    analyzed.loc[timing_flag, "suspicion_reason"] = "timing"
+    analyzed.loc[size_flag, "suspicion_reason"] = "size"
+    analyzed.loc[timing_flag & size_flag, "suspicion_reason"] = "timing_and_size"
+    return analyzed
+
+
+def _track_a_detect_replays(analyzed_df: pd.DataFrame, min_gap_s: float = 0.03) -> pd.DataFrame:
+    replay = analyzed_df.copy()
+    replay["flow"] = (
+        replay["source"].astype(str)
+        + ":"
+        + replay["src_port"].astype(str)
+        + "->"
+        + replay["destination"].astype(str)
+        + ":"
+        + replay["dst_port"].astype(str)
+    )
+
+    payload_basis = replay["payload_hash"].astype(str)
+    fallback_basis = replay["flow"] + "|" + replay["seq"].astype(str) + "|" + replay["ack"].astype(str) + "|" + replay["length"].round(2).astype(str)
+    payload_basis = payload_basis.where(payload_basis.str.len() > 0, fallback_basis)
+    replay["fingerprint"] = replay["flow"] + "|" + replay["seq"].astype(str) + "|" + replay["ack"].astype(str) + "|" + payload_basis
+
+    candidates = []
+    for fingerprint, group in replay.groupby("fingerprint", dropna=False):
+        if len(group) < 2:
+            continue
+        ordered_times = group["timestamp"].sort_values().to_numpy()
+        gaps = pd.Series(ordered_times).diff().dropna().to_numpy()
+        if len(gaps) == 0 or float(max(gaps)) < min_gap_s:
+            continue
+
+        first_row = group.iloc[0]
+        candidates.append(
+            {
+                "flow": first_row["flow"],
+                "sequence": int(first_row["seq"]),
+                "ack": int(first_row["ack"]),
+                "length": float(first_row["length"]),
+                "occurrences": int(len(group)),
+                "first_seen": float(group["timestamp"].min()),
+                "last_seen": float(group["timestamp"].max()),
+                "max_gap_s": float(max(gaps)),
+                "fingerprint": fingerprint,
+            }
+        )
+
+    if not candidates:
+        return pd.DataFrame(columns=["flow", "sequence", "ack", "length", "occurrences", "first_seen", "last_seen", "max_gap_s", "fingerprint"])
+
+    return pd.DataFrame(candidates).sort_values(["occurrences", "max_gap_s"], ascending=[False, False]).reset_index(drop=True)
 
 
 def _at(total_packets: int, frac: float) -> int:
@@ -1441,6 +1687,109 @@ for attack_name in ["replay", "spoof", "timing_side_channel"]:
 
 _section_title("Threat Coverage Radar", "Circular coverage view across replay, spoof, and timing vectors")
 _render_radar_chart(coverage_map)
+
+st.divider()
+_section_title("TRACK A - LIVE DATA ANALYSER", "Upload pre-captured TCP CSV/PCAP data for timing, size, and replay anomaly analysis")
+
+track_a_upload = st.file_uploader(
+    "Upload a TCP dataset (.csv, .pcap, .pcapng)",
+    type=["csv", "pcap", "pcapng"],
+    key="track_a_upload",
+)
+
+if track_a_upload is not None:
+    try:
+        uploaded_df, mapping_report = _track_a_parse_uploaded(track_a_upload)
+        track_a_analyzed = _track_a_detect_anomalies(uploaded_df)
+        replay_candidates_df = _track_a_detect_replays(track_a_analyzed)
+
+        suspicious_count = int(track_a_analyzed["is_suspicious"].sum())
+        suspicious_rate = (suspicious_count / max(1, len(track_a_analyzed))) * 100.0
+        replay_count = int(len(replay_candidates_df))
+        track_a_status = "HARDENED" if replay_count == 0 and suspicious_rate < 8.0 else "COMPROMISED"
+
+        summary_cols = st.columns(4)
+        summary_cols[0].markdown(_metric_card("PACKETS", f"{len(track_a_analyzed)}", "◫"), unsafe_allow_html=True)
+        summary_cols[1].markdown(_metric_card("ANOMALIES", f"{suspicious_count}", "⚠", pulse=suspicious_count > 0), unsafe_allow_html=True)
+        summary_cols[2].markdown(_metric_card("REPLAY CANDIDATES", f"{replay_count}", "⟳", pulse=replay_count > 0), unsafe_allow_html=True)
+        summary_cols[3].markdown(_metric_card("TRACK A STATUS", track_a_status, "⚑", value_color="#00ff88" if track_a_status == "HARDENED" else "#ff3333"), unsafe_allow_html=True)
+
+        st.markdown(
+            f"""
+            <div class="ops-card">
+              <div class="scope-title">Auto-Parsed Field Mapping</div>
+              <div style="font-size:13px; line-height:1.55;">Detected from <b>{escape(track_a_upload.name)}</b> ({escape(str(uploaded_df['source_format'].iloc[0]))}).</div>
+              <div style="font-size:12px; margin-top:0.45rem; color:#b9ccdf; white-space:pre-wrap;">{escape(json.dumps(mapping_report, indent=2))}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        timeline_df = track_a_analyzed.copy()
+        timeline_df["index"] = range(len(timeline_df))
+
+        timing_chart_track_a = (
+            alt.Chart(timeline_df)
+            .mark_line(color="#00d4ff", strokeWidth=1.8)
+            .encode(
+                x=alt.X("index:Q", title="Packet Index"),
+                y=alt.Y("iat_ms:Q", title="Inter-arrival Time (ms)"),
+                tooltip=["index", "iat_ms", "source", "destination", "suspicion_reason"],
+            )
+        )
+        timing_anomaly_points = (
+            alt.Chart(timeline_df[timeline_df["is_suspicious"]])
+            .mark_point(color="#ff3333", size=55, filled=True)
+            .encode(x="index:Q", y="iat_ms:Q", tooltip=["index", "iat_ms", "suspicion_reason"])
+        )
+        st.markdown('<div class="chart-frame">', unsafe_allow_html=True)
+        st.altair_chart(
+            (timing_chart_track_a + timing_anomaly_points)
+            .properties(height=420, title="TRACK A: Timing Pattern Anomaly Scan", background="#0d1117")
+            .configure_view(stroke=None)
+            .configure_axis(gridColor="rgba(255,255,255,0.1)", gridDash=[2, 4], labelColor="#e8e8e8", titleColor="#e8e8e8")
+            .configure_title(color="#ff9933", font="Segoe UI Condensed", fontSize=14),
+            use_container_width=True,
+        )
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        size_chart_track_a = (
+            alt.Chart(timeline_df)
+            .mark_bar()
+            .encode(
+                x=alt.X("index:Q", title="Packet Index"),
+                y=alt.Y("length:Q", title="Packet Length"),
+                color=alt.condition(alt.datum.is_suspicious, alt.value("#ff3333"), alt.value("#138808")),
+                tooltip=["index", "length", "protocol", "suspicion_reason"],
+            )
+            .properties(height=420, title="TRACK A: Packet Size Profile", background="#0d1117")
+            .configure_view(stroke=None)
+            .configure_axis(gridColor="rgba(255,255,255,0.1)", gridDash=[2, 4], labelColor="#e8e8e8", titleColor="#e8e8e8")
+            .configure_title(color="#ff9933", font="Segoe UI Condensed", fontSize=14)
+        )
+        st.markdown('<div class="chart-frame">', unsafe_allow_html=True)
+        st.altair_chart(size_chart_track_a, use_container_width=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        _section_title("TRACK A Findings", "Suspicious packets and replay-style sequence candidates")
+        suspicious_rows = track_a_analyzed[track_a_analyzed["is_suspicious"]].copy()
+        suspicious_rows = suspicious_rows[["timestamp", "source", "destination", "length", "iat_ms", "suspicion_reason"]].head(250)
+        st.markdown('<div class="ops-card"><div class="scope-title">Statistical anomalies (timing/size)</div></div>', unsafe_allow_html=True)
+        st.dataframe(suspicious_rows, use_container_width=True, hide_index=True)
+
+        st.markdown('<div class="ops-card"><div class="scope-title">Suspicious replay-like sequences</div></div>', unsafe_allow_html=True)
+        st.dataframe(replay_candidates_df.head(200), use_container_width=True, hide_index=True)
+    except Exception as track_a_error:
+        st.markdown(
+            f"""
+            <div class="ops-card" style="border-left:5px solid #ff3333;">
+                <div class="scope-title" style="color:#ff3333;">TRACK A Parser Error</div>
+                <div style="white-space:pre-wrap; line-height:1.55;">{escape(str(track_a_error))}</div>
+                <div style="margin-top:0.4rem; color:#b8c9db; font-size:12px;">Tip: CSV files should include timestamp/source/destination/length/protocol when possible. PCAP requires scapy in the runtime.</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
 show_composite = st.toggle("Show command-center composite image", value=False)
 if show_composite:
