@@ -815,14 +815,23 @@ def _track_a_detect_anomalies(df: pd.DataFrame) -> pd.DataFrame:
     analyzed["iat_ms"] = analyzed["timestamp"].diff().fillna(0).clip(lower=0) * 1000.0
     analyzed["z_iat"] = _track_a_robust_zscore(analyzed["iat_ms"])
     analyzed["z_len"] = _track_a_robust_zscore(analyzed["length"])
+    analyzed["anomaly_score"] = analyzed["z_iat"].abs() + analyzed["z_len"].abs()
 
-    timing_flag = analyzed["z_iat"].abs() >= 4.0
-    size_flag = analyzed["z_len"].abs() >= 4.0
+    timing_flag = analyzed["z_iat"].abs() >= 3.2
+    size_flag = analyzed["z_len"].abs() >= 3.2
     analyzed["is_suspicious"] = timing_flag | size_flag
     analyzed["suspicion_reason"] = "none"
     analyzed.loc[timing_flag, "suspicion_reason"] = "timing"
     analyzed.loc[size_flag, "suspicion_reason"] = "size"
     analyzed.loc[timing_flag & size_flag, "suspicion_reason"] = "timing_and_size"
+
+    # Ensure non-empty findings for low-variance captures by surfacing top outliers.
+    if not analyzed["is_suspicious"].any() and len(analyzed) > 0:
+        fallback_count = max(1, min(10, int(len(analyzed) * 0.02)))
+        fallback_idx = analyzed["anomaly_score"].nlargest(fallback_count).index
+        analyzed.loc[fallback_idx, "is_suspicious"] = True
+        analyzed.loc[fallback_idx, "suspicion_reason"] = "low_signal_outlier"
+
     return analyzed
 
 
@@ -864,11 +873,45 @@ def _track_a_detect_replays(analyzed_df: pd.DataFrame, min_gap_s: float = 0.03) 
                 "last_seen": float(group["timestamp"].max()),
                 "max_gap_s": float(max(gaps)),
                 "fingerprint": fingerprint,
+                "detection_rule": "seq_ack_payload_repeat",
             }
         )
 
+    # Secondary heuristic for captures lacking reliable seq/ack/payload fields.
     if not candidates:
-        return pd.DataFrame(columns=["flow", "sequence", "ack", "length", "occurrences", "first_seen", "last_seen", "max_gap_s", "fingerprint"])
+        replay["behavior_fingerprint"] = (
+            replay["flow"].astype(str)
+            + "|"
+            + replay["length"].round(1).astype(str)
+            + "|"
+            + replay["flags"].astype(str)
+        )
+        for fingerprint, group in replay.groupby("behavior_fingerprint", dropna=False):
+            if len(group) < 3:
+                continue
+            ordered_times = group["timestamp"].sort_values().to_numpy()
+            gaps = pd.Series(ordered_times).diff().dropna().to_numpy()
+            if len(gaps) == 0 or float(max(gaps)) < min_gap_s:
+                continue
+
+            first_row = group.iloc[0]
+            candidates.append(
+                {
+                    "flow": first_row["flow"],
+                    "sequence": int(first_row["seq"]),
+                    "ack": int(first_row["ack"]),
+                    "length": float(first_row["length"]),
+                    "occurrences": int(len(group)),
+                    "first_seen": float(group["timestamp"].min()),
+                    "last_seen": float(group["timestamp"].max()),
+                    "max_gap_s": float(max(gaps)),
+                    "fingerprint": fingerprint,
+                    "detection_rule": "flow_len_flag_repeat",
+                }
+            )
+
+    if not candidates:
+        return pd.DataFrame(columns=["flow", "sequence", "ack", "length", "occurrences", "first_seen", "last_seen", "max_gap_s", "fingerprint", "detection_rule"])
 
     return pd.DataFrame(candidates).sort_values(["occurrences", "max_gap_s"], ascending=[False, False]).reset_index(drop=True)
 
@@ -1778,7 +1821,7 @@ if track_a_upload is not None:
 
         _section_title("TRACK A Findings", "Suspicious packets and replay-style sequence candidates")
         suspicious_rows = track_a_analyzed[track_a_analyzed["is_suspicious"]].copy()
-        suspicious_rows = suspicious_rows[["timestamp", "source", "destination", "length", "iat_ms", "suspicion_reason"]].head(250)
+        suspicious_rows = suspicious_rows[["timestamp", "source", "destination", "length", "iat_ms", "anomaly_score", "suspicion_reason"]].sort_values("anomaly_score", ascending=False).head(250)
         st.markdown('<div class="ops-card"><div class="scope-title">Statistical anomalies (timing/size)</div></div>', unsafe_allow_html=True)
         st.dataframe(suspicious_rows, use_container_width=True, hide_index=True)
 
