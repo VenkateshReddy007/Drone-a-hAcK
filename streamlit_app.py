@@ -28,7 +28,7 @@ st.markdown(
     """
     <style>
     .stApp { background-color: #0a0a1a; color: #d8fbe8; }
-    .block-container { padding-top: 1rem; padding-bottom: 1rem; max-width: 96rem; }
+    .main .block-container { padding-top: 4rem; padding-bottom: 1rem; max-width: 96rem; }
     [data-testid="stMetricValue"] { color: #00ff88; }
     [data-testid="stMetricLabel"] { color: #a8bfb1; }
     .qshield-header {
