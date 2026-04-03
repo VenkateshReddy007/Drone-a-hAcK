@@ -1379,7 +1379,7 @@ if not timing_subset.empty:
         anomaly_threshold = float(base_timing.mean() + base_timing.std(ddof=0) * 3)
     else:
         anomaly_threshold = float(timing_subset["response_ms"].mean())
-timing_chart = (
+timing_base = (
     alt.Chart(timing_subset)
     .mark_bar(size=22)
     .encode(
@@ -1388,15 +1388,19 @@ timing_chart = (
         color=alt.condition(alt.datum.is_attack, alt.value("#ff3333"), alt.value("#00d4ff")),
         tooltip=["sequence", "response_ms", "event", "command"],
     )
+)
+timing_layers = [timing_base]
+if anomaly_threshold:
+    threshold_rule = alt.Chart(pd.DataFrame({"threshold": [anomaly_threshold]})).mark_rule(color="#ff9933", strokeDash=[8, 6]).encode(y="threshold:Q")
+    threshold_label = alt.Chart(pd.DataFrame({"threshold": [anomaly_threshold]})).mark_text(color="#ff9933", align="left", dx=6, dy=-6, fontWeight="bold").encode(y="threshold:Q", text=alt.value("ANOMALY THRESHOLD"))
+    timing_layers.extend([threshold_rule, threshold_label])
+timing_chart = (
+    alt.layer(*timing_layers)
     .properties(height=420, title="Timing Side-Channel Window", background="#0d1117")
     .configure_view(stroke=None)
     .configure_axis(gridColor="rgba(255,255,255,0.1)", gridDash=[2, 4], labelColor="#e8e8e8", titleColor="#e8e8e8")
     .configure_title(color="#ff9933", font="Segoe UI Condensed", fontSize=14)
 )
-if anomaly_threshold:
-    threshold_rule = alt.Chart(pd.DataFrame({"threshold": [anomaly_threshold]})).mark_rule(color="#ff9933", strokeDash=[8, 6]).encode(y="threshold:Q")
-    threshold_label = alt.Chart(pd.DataFrame({"threshold": [anomaly_threshold]})).mark_text(color="#ff9933", align="left", dx=6, dy=-6, fontWeight="bold").encode(y="threshold:Q", text=alt.value("ANOMALY THRESHOLD"))
-    timing_chart = timing_chart + threshold_rule + threshold_label
 st.markdown('<div class="chart-frame">', unsafe_allow_html=True)
 st.altair_chart(timing_chart, use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
