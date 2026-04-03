@@ -1,0 +1,13 @@
+# Local secrets
+.env
+.streamlit/secrets.toml
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Streamlit cache and artifacts
+.streamlit/cache/
+qshield_dashboard.png
