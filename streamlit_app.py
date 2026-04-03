@@ -678,7 +678,12 @@ def _track_a_coerce_timestamp(series: pd.Series) -> pd.Series:
 
 
 def _track_a_parse_csv(uploaded_file) -> tuple[pd.DataFrame, dict[str, str]]:
-    raw = pd.read_csv(uploaded_file, sep=None, engine="python", low_memory=False)
+    uploaded_file.seek(0)
+    try:
+        raw = pd.read_csv(uploaded_file, sep=None, engine="python")
+    except Exception:
+        uploaded_file.seek(0)
+        raw = pd.read_csv(uploaded_file)
     raw = _track_a_normalize_columns(raw)
 
     mapped: dict[str, str] = {}
