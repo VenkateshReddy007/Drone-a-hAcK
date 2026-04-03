@@ -910,6 +910,41 @@ def _track_a_detect_replays(analyzed_df: pd.DataFrame, min_gap_s: float = 0.03) 
                 }
             )
 
+    # Fallback heuristic: short-gap repeats can still indicate buffered replay bursts
+    # in low-latency captures where attacker injections happen quickly.
+    if not candidates:
+        replay["fast_repeat_fp"] = (
+            replay["flow"].astype(str)
+            + "|"
+            + replay["length"].round(1).astype(str)
+            + "|"
+            + replay["seq"].astype(str)
+        )
+        for fingerprint, group in replay.groupby("fast_repeat_fp", dropna=False):
+            if len(group) < 2:
+                continue
+
+            ordered = group.sort_values("timestamp")
+            gaps = ordered["timestamp"].diff().dropna()
+            if gaps.empty:
+                continue
+
+            first_row = ordered.iloc[0]
+            candidates.append(
+                {
+                    "flow": first_row["flow"],
+                    "sequence": int(first_row["seq"]),
+                    "ack": int(first_row["ack"]),
+                    "length": float(first_row["length"]),
+                    "occurrences": int(len(group)),
+                    "first_seen": float(ordered["timestamp"].min()),
+                    "last_seen": float(ordered["timestamp"].max()),
+                    "max_gap_s": float(gaps.max()),
+                    "fingerprint": fingerprint,
+                    "detection_rule": "fast_repeat_low_gap",
+                }
+            )
+
     if not candidates:
         return pd.DataFrame(columns=["flow", "sequence", "ack", "length", "occurrences", "first_seen", "last_seen", "max_gap_s", "fingerprint", "detection_rule"])
 
