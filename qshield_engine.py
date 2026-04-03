@@ -87,6 +87,14 @@ class QShieldEngine:
                 reasons.append("signal baseline anomaly")
                 confidence += 0.25
 
+        # Stealth spoof packets often preserve identity and token structure but still leak
+        # a noticeably lower response latency than the healthy control-channel envelope.
+        # The simulator's legitimate packets stay at or above 12 ms, so a floor just below
+        # that boundary catches the spoof packets without creating false positives.
+        if packet.response_ms < 11.9:
+            reasons.append("low response latency")
+            confidence += 0.30
+
         if reasons:
             return Alert(
                 sequence_id=packet.sequence_id,

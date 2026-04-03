@@ -188,10 +188,10 @@ def run_profile(profile: str, packet_count: int, seed: int):
 
 def run_stress_matrix(packet_count: int, seed: int) -> pd.DataFrame:
     scenarios = [
-        ("stealth_spoof", 55.0, 85.0, 2),
-        ("burst_replay", 80.0, 85.0, 2),
-        ("timing_heavy_probe", 75.0, 80.0, 2),
-        ("mixed_swarm", 70.0, 80.0, 3),
+        ("stealth_spoof", 85.0, 85.0, 1),
+        ("burst_replay", 85.0, 85.0, 1),
+        ("timing_heavy_probe", 85.0, 85.0, 1),
+        ("mixed_swarm", 85.0, 85.0, 1),
     ]
     rows = []
     for idx, (profile, min_recall, min_precision, max_fp) in enumerate(scenarios):
@@ -214,7 +214,7 @@ def run_stress_matrix(packet_count: int, seed: int) -> pd.DataFrame:
 
 def make_mission_verdict(qshield_metrics: Dict[str, float], stress_df: pd.DataFrame) -> Dict[str, str]:
     pass_rate = (stress_df["result"] == "PASS").mean() * 100 if not stress_df.empty else 0.0
-    score = (0.45 * qshield_metrics["recall"]) + (0.35 * qshield_metrics["precision"]) + (0.20 * pass_rate)
+    score = (0.40 * qshield_metrics["recall"]) + (0.40 * qshield_metrics["precision"]) + (0.20 * pass_rate)
     if score >= 80:
         level = "HIGH CONFIDENCE"
     elif score >= 65:
