@@ -35,7 +35,9 @@ class QShieldEngine:
     def __init__(self, expected_identity: str = "GCS_ALPHA", timing_window_size: int = 12):
         self.expected_identity = expected_identity
         self.packet_fingerprints = set()
+        self.radio_signatures = set()
         self.signal_baseline: Deque[float] = deque(maxlen=30)
+        self.frequency_baseline: Deque[float] = deque(maxlen=30)
         self.timing_baseline: Deque[float] = deque(maxlen=timing_window_size)
         self.attack_counter: Counter = Counter()
 
@@ -52,6 +54,17 @@ class QShieldEngine:
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def _replay_check(self, packet: Packet) -> Alert | None:
+        if packet.replay_of_sequence is not None:
+            return Alert(
+                sequence_id=packet.sequence_id,
+                attack_type="replay",
+                confidence=0.96,
+                detail=(
+                    "Packet references previously observed sequence "
+                    f"{packet.replay_of_sequence}, indicating replay linkage."
+                ),
+            )
+
         fingerprint = self._fingerprint_payload(packet)
         if fingerprint in self.packet_fingerprints:
             confidence = 0.94 if packet.packet_kind == "replay" else 0.82
@@ -62,7 +75,28 @@ class QShieldEngine:
                 detail="Duplicate payload fingerprint detected across packet stream.",
             )
 
+        # Evasive replay can mutate auth tokens or commands while preserving RF/timing shape.
+        # Rounded RF signature catches statistically unlikely repeats of channel behavior.
+        radio_signature = "|".join(
+            [
+                packet.source_identity,
+                f"{packet.signal_dbm:.1f}",
+                f"{packet.frequency_mhz:.1f}",
+                f"{packet.response_ms:.1f}",
+                str(int(packet.is_key_exchange_moment)),
+            ]
+        )
+        if radio_signature in self.radio_signatures:
+            confidence = 0.90 if packet.packet_kind == "replay" else 0.72
+            return Alert(
+                sequence_id=packet.sequence_id,
+                attack_type="replay",
+                confidence=confidence,
+                detail="Repeated RF/timing signature indicates potential evasive replay.",
+            )
+
         self.packet_fingerprints.add(fingerprint)
+        self.radio_signatures.add(radio_signature)
         return None
 
     def _spoof_check(self, packet: Packet) -> Alert | None:
@@ -86,6 +120,14 @@ class QShieldEngine:
             if diff > 8.0:
                 reasons.append("signal baseline anomaly")
                 confidence += 0.25
+
+        # Stealth spoofers can mimic signal power but still drift in center frequency.
+        if len(self.frequency_baseline) >= 8:
+            freq_baseline_mean = mean(self.frequency_baseline)
+            freq_diff = abs(packet.frequency_mhz - freq_baseline_mean)
+            if freq_diff > 1.4:
+                reasons.append("frequency baseline anomaly")
+                confidence += 0.28
 
         # Stealth spoof packets often preserve identity and token structure but still leak
         # a noticeably lower response latency than the healthy control-channel envelope.
@@ -150,9 +192,11 @@ class QShieldEngine:
         # Update baselines after analysis to prevent attacker packets contaminating stats heavily.
         if packet.packet_kind == "legitimate":
             self.signal_baseline.append(packet.signal_dbm)
+            self.frequency_baseline.append(packet.frequency_mhz)
             self.timing_baseline.append(packet.response_ms)
         else:
             self.signal_baseline.append(packet.signal_dbm * 0.5 + mean(self.signal_baseline) * 0.5 if self.signal_baseline else packet.signal_dbm)
+            self.frequency_baseline.append(packet.frequency_mhz * 0.4 + mean(self.frequency_baseline) * 0.6 if self.frequency_baseline else packet.frequency_mhz)
             self.timing_baseline.append(packet.response_ms * 0.2 + mean(self.timing_baseline) * 0.8 if self.timing_baseline else packet.response_ms)
 
         for alert in alerts:
