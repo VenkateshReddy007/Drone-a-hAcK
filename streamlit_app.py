@@ -951,6 +951,132 @@ def _track_a_detect_replays(analyzed_df: pd.DataFrame, min_gap_s: float = 0.03) 
     return pd.DataFrame(candidates).sort_values(["occurrences", "max_gap_s"], ascending=[False, False]).reset_index(drop=True)
 
 
+def _track_a_build_context(upload_name: str, analyzed_df: pd.DataFrame, replay_df: pd.DataFrame, mapping_report: dict[str, str]) -> str:
+    suspicious_df = analyzed_df.loc[analyzed_df["is_suspicious"]].copy()
+    top_suspicious = suspicious_df.sort_values("anomaly_score", ascending=False).head(8)
+    top_replays = replay_df.head(5)
+
+    return json.dumps(
+        {
+            "file_name": upload_name,
+            "packet_count": int(len(analyzed_df)),
+            "timestamp_range": [float(analyzed_df["timestamp"].min()), float(analyzed_df["timestamp"].max())],
+            "suspicious_count": int(len(suspicious_df)),
+            "replay_candidate_count": int(len(replay_df)),
+            "anomaly_rate": round((len(suspicious_df) / max(1, len(analyzed_df))) * 100.0, 2),
+            "mapping": mapping_report,
+            "top_suspicious": top_suspicious[["timestamp", "source", "destination", "length", "iat_ms", "anomaly_score", "suspicion_reason"]].to_dict(orient="records") if not top_suspicious.empty else [],
+            "replay_candidates": top_replays.to_dict(orient="records") if not top_replays.empty else [],
+            "notes": [
+                "Answer using only the uploaded TCP dataset context.",
+                "If the user asks about replay, timing, packet size, endpoints, or file parsing, ground the response in the provided findings.",
+                "Do not invent fields that are not present in the uploaded file.",
+            ],
+        },
+        indent=2,
+        sort_keys=True,
+    )
+
+
+def _track_a_local_answer(question: str, analyzed_df: pd.DataFrame, replay_df: pd.DataFrame) -> str:
+    suspicious_df = analyzed_df.loc[analyzed_df["is_suspicious"]].copy()
+    packet_count = len(analyzed_df)
+    suspicious_count = len(suspicious_df)
+    replay_count = len(replay_df)
+    anomaly_rate = (suspicious_count / max(1, packet_count)) * 100.0
+
+    question_l = question.lower().strip()
+    reply_parts = [
+        f"I analyzed {packet_count} TCP packets from the uploaded file.",
+        f"Suspicious timing/size anomalies: {suspicious_count} ({anomaly_rate:.1f}%).",
+        f"Replay candidates: {replay_count}.",
+    ]
+
+    if any(term in question_l for term in ["replay", "repeat", "duplicate", "same packet"]):
+        if replay_count > 0:
+            top = replay_df.iloc[0]
+            reply_parts.append(
+                f"The strongest replay-like sequence is flow {top['flow']} with {int(top['occurrences'])} repeats and a max gap of {float(top['max_gap_s']):.6f} seconds."
+            )
+        else:
+            reply_parts.append("I did not find a high-confidence replay fingerprint in the uploaded file.")
+
+    if any(term in question_l for term in ["timing", "delay", "latency", "inter-arrival"]):
+        if not suspicious_df.empty:
+            top = suspicious_df.sort_values("anomaly_score", ascending=False).iloc[0]
+            reply_parts.append(
+                f"The strongest timing outlier appears at timestamp {float(top['timestamp']):.6f} with iat_ms {float(top['iat_ms']):.3f} and anomaly score {float(top['anomaly_score']):.3f}."
+            )
+
+    if any(term in question_l for term in ["size", "length", "packet length", "payload"]):
+        if not suspicious_df.empty:
+            top_size = suspicious_df.sort_values("anomaly_score", ascending=False).iloc[0]
+            reply_parts.append(
+                f"The most notable packet size outlier is length {float(top_size['length']):.1f}, marked as {top_size['suspicion_reason']}."
+            )
+
+    if any(term in question_l for term in ["source", "destination", "endpoint", "ip", "host"]):
+        top_flow = analyzed_df.assign(flow=analyzed_df["source"].astype(str) + " -> " + analyzed_df["destination"].astype(str)).groupby("flow").size().sort_values(ascending=False)
+        if not top_flow.empty:
+            reply_parts.append(f"The busiest observed endpoint pair is {top_flow.index[0]}.")
+
+    if len(reply_parts) == 3:
+        reply_parts.append("If you want, I can also explain the most suspicious row or summarize the likely attack pattern.")
+
+    return " ".join(reply_parts)
+
+
+def _track_a_ask_agent(question: str, upload_name: str, analyzed_df: pd.DataFrame, replay_df: pd.DataFrame, mapping_report: dict[str, str]) -> str:
+    api_key = _load_gemini_api_key()
+    context_json = _track_a_build_context(upload_name, analyzed_df, replay_df, mapping_report)
+
+    if not api_key:
+        return _track_a_local_answer(question, analyzed_df, replay_df)
+
+    system_prompt = (
+        "You are the TRACK A live data analyst for QSHIELD. Answer only from the uploaded TCP dataset context. "
+        "Be concise, practical, and specific to the parsed file. Do not invent packet fields or claim detections that are not supported by the context."
+    )
+    user_prompt = (
+        f"Uploaded TCP dataset context:\n{context_json}\n\n"
+        f"User question: {question}\n\n"
+        "Answer in 4-6 concise sentences. Reference the most relevant packet statistics, suspicious rows, or replay candidates when applicable."
+    )
+    payload = {
+        "systemInstruction": {"parts": [{"text": system_prompt}]},
+        "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
+        "generationConfig": {
+            "temperature": 0.35,
+            "topP": 0.95,
+            "maxOutputTokens": 350,
+        },
+    }
+
+    for model in _gemini_model_candidates():
+        request = urllib.request.Request(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                response_data = json.loads(response.read().decode("utf-8"))
+            candidates = response_data.get("candidates", [])
+            if candidates:
+                parts = candidates[0].get("content", {}).get("parts", [])
+                text = "".join(part.get("text", "") for part in parts).strip()
+                if text:
+                    return text
+        except urllib.error.HTTPError as error:
+            if error.code != 404:
+                return f"Track A analyst request failed with HTTP {error.code}. Falling back to the local dataset summary."
+        except Exception:
+            break
+
+    return _track_a_local_answer(question, analyzed_df, replay_df)
+
+
 def _at(total_packets: int, frac: float) -> int:
     return max(3, min(total_packets - 2, int(round(total_packets * frac))))
 
@@ -1862,6 +1988,25 @@ if track_a_upload is not None:
 
         st.markdown('<div class="ops-card"><div class="scope-title">Suspicious replay-like sequences</div></div>', unsafe_allow_html=True)
         st.dataframe(replay_candidates_df.head(200), use_container_width=True, hide_index=True)
+
+        _section_title("TRACK A Analyst", "Ask live questions about the uploaded TCP file")
+        track_a_question = st.text_input(
+            "Ask about the uploaded dataset",
+            placeholder="Which flow looks most suspicious and why?",
+            key=f"track_a_question_{track_a_upload.name}",
+        )
+        ask_track_a_clicked = st.button("Ask TRACK A Agent", key=f"track_a_ask_{track_a_upload.name}")
+        if ask_track_a_clicked and track_a_question.strip():
+            track_a_answer = _track_a_ask_agent(track_a_question.strip(), track_a_upload.name, track_a_analyzed, replay_candidates_df, mapping_report)
+            st.markdown(
+                f"""
+                <div class="ops-card">
+                    <div class="scope-title">TRACK A Agent Answer</div>
+                    <div style="white-space:pre-wrap; line-height:1.55;">{escape(track_a_answer)}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
     except Exception as track_a_error:
         st.markdown(
             f"""
