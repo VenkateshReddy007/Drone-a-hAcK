@@ -626,12 +626,15 @@ def _section_title(title: str, subtitle: str | None = None) -> None:
 
 TRACK_A_COLUMN_CANDIDATES = {
     "timestamp": ["timestamp", "time", "ts", "epoch", "frame.time_epoch", "frame.time", "capture_time"],
+    "src_ip": ["src_ip", "source", "src", "ip.src", "source_ip", "ipv4_src", "ipv6_src"],
+    "dst_ip": ["dst_ip", "destination", "dst", "ip.dst", "dest_ip", "ipv4_dst", "ipv6_dst"],
     "source": ["src", "source", "src_ip", "source_ip", "ip.src", "ipv4_src", "ipv6_src"],
     "destination": ["dst", "destination", "dst_ip", "dest_ip", "ip.dst", "ipv4_dst", "ipv6_dst"],
     "src_port": ["src_port", "sport", "tcp.srcport", "source_port", "srcport"],
     "dst_port": ["dst_port", "dport", "tcp.dstport", "destination_port", "dstport"],
-    "length": ["length", "len", "frame.len", "tcp.len", "packet_len", "payload_len", "packet_size", "size"],
+    "length": ["length", "len", "frame.len", "tcp.len", "packet_len", "packet_length", "payload_len", "packet_size", "size"],
     "protocol": ["protocol", "proto", "transport", "ip.proto", "layer4"],
+    "auth_token_valid": ["auth_token_valid", "token_valid", "valid_token", "auth_valid"],
     "seq": ["seq", "tcp.seq", "sequence", "sequence_number", "tcp_seq"],
     "ack": ["ack", "tcp.ack", "ack_number", "acknowledgment", "tcp_ack"],
     "flags": ["flags", "tcp.flags", "tcp_flag", "flag"],
@@ -700,12 +703,25 @@ def _track_a_parse_csv(uploaded_file) -> tuple[pd.DataFrame, dict[str, str]]:
 
     out = pd.DataFrame(index=raw.index)
     out["timestamp"] = _track_a_coerce_timestamp(raw[mapped["timestamp"]]) if "timestamp" in mapped else pd.Series(range(len(raw)), index=raw.index, dtype=float)
-    out["source"] = raw[mapped["source"]].astype(str) if "source" in mapped else "unknown_source"
-    out["destination"] = raw[mapped["destination"]].astype(str) if "destination" in mapped else "unknown_destination"
+    source_series = raw[mapped["source"]].astype(str) if "source" in mapped else "unknown_source"
+    destination_series = raw[mapped["destination"]].astype(str) if "destination" in mapped else "unknown_destination"
+    out["source"] = source_series
+    out["destination"] = destination_series
+    out["src_ip"] = raw[mapped["src_ip"]].astype(str) if "src_ip" in mapped else source_series
+    out["dst_ip"] = raw[mapped["dst_ip"]].astype(str) if "dst_ip" in mapped else destination_series
     out["src_port"] = pd.to_numeric(raw[mapped["src_port"]], errors="coerce").fillna(-1).astype(int) if "src_port" in mapped else -1
     out["dst_port"] = pd.to_numeric(raw[mapped["dst_port"]], errors="coerce").fillna(-1).astype(int) if "dst_port" in mapped else -1
     out["length"] = pd.to_numeric(raw[mapped["length"]], errors="coerce").fillna(0).astype(float) if "length" in mapped else 0.0
+    out["packet_length"] = out["length"]
     out["protocol"] = raw[mapped["protocol"]].astype(str) if "protocol" in mapped else "TCP"
+    if "auth_token_valid" in mapped:
+        token_series = raw[mapped["auth_token_valid"]]
+        if token_series.dtype == bool:
+            out["auth_token_valid"] = token_series.fillna(False)
+        else:
+            out["auth_token_valid"] = token_series.astype(str).str.strip().str.lower().isin(["true", "1", "yes", "y", "valid"])
+    else:
+        out["auth_token_valid"] = True
     out["seq"] = pd.to_numeric(raw[mapped["seq"]], errors="coerce").fillna(-1).astype("int64") if "seq" in mapped else -1
     out["ack"] = pd.to_numeric(raw[mapped["ack"]], errors="coerce").fillna(-1).astype("int64") if "ack" in mapped else -1
     out["flags"] = raw[mapped["flags"]].astype(str) if "flags" in mapped else ""
@@ -810,29 +826,70 @@ def _track_a_robust_zscore(series: pd.Series) -> pd.Series:
     return (series - median) / (1.4826 * mad)
 
 
-def _track_a_detect_anomalies(df: pd.DataFrame) -> pd.DataFrame:
+def _track_a_prepare_analysis(df: pd.DataFrame) -> pd.DataFrame:
     analyzed = df.copy().sort_values("timestamp").reset_index(drop=True)
     analyzed["iat_ms"] = analyzed["timestamp"].diff().fillna(0).clip(lower=0) * 1000.0
-    analyzed["z_iat"] = _track_a_robust_zscore(analyzed["iat_ms"])
-    analyzed["z_len"] = _track_a_robust_zscore(analyzed["length"])
-    analyzed["anomaly_score"] = analyzed["z_iat"].abs() + analyzed["z_len"].abs()
+    analyzed["anomaly_score"] = 0.0
+    analyzed["suspicion_reason"] = ""
+    analyzed["is_suspicious"] = False
 
-    timing_flag = analyzed["z_iat"].abs() >= 3.2
-    size_flag = analyzed["z_len"].abs() >= 3.2
-    analyzed["is_suspicious"] = timing_flag | size_flag
-    analyzed["suspicion_reason"] = "none"
-    analyzed.loc[timing_flag, "suspicion_reason"] = "timing"
-    analyzed.loc[size_flag, "suspicion_reason"] = "size"
-    analyzed.loc[timing_flag & size_flag, "suspicion_reason"] = "timing_and_size"
+    baseline_src_ip = None
+    if "src_ip" in analyzed.columns and not analyzed.empty:
+        src_counts = analyzed["src_ip"].astype(str).replace({"nan": ""}).value_counts()
+        if not src_counts.empty:
+            baseline_src_ip = str(src_counts.index[0])
 
-    # Ensure non-empty findings for low-variance captures by surfacing top outliers.
-    if not analyzed["is_suspicious"].any() and len(analyzed) > 0:
-        fallback_count = max(1, min(10, int(len(analyzed) * 0.02)))
-        fallback_idx = analyzed["anomaly_score"].nlargest(fallback_count).index
-        analyzed.loc[fallback_idx, "is_suspicious"] = True
-        analyzed.loc[fallback_idx, "suspicion_reason"] = "low_signal_outlier"
+    avg_length = float(analyzed["length"].mean()) if len(analyzed) else 0.0
+
+    for idx, row in analyzed.iterrows():
+        reasons: list[str] = []
+        score = 0.0
+
+        if idx > 0 and float(row.get("iat_ms", 0.0)) < 1.0:
+            reasons.append("timing_flood_anomaly")
+            score += 4.0
+
+        if idx > 0 and float(row.get("iat_ms", 0.0)) > 0:
+            z_iat = abs(float(_track_a_robust_zscore(pd.Series(analyzed.loc[:idx, "iat_ms"].astype(float))).iloc[-1]))
+            score += min(1.0, z_iat * 0.25)
+
+        if baseline_src_ip and str(row.get("src_ip", "")) != baseline_src_ip:
+            reasons.append("rogue_ip_detected")
+            score += 5.0
+
+        auth_value = row.get("auth_token_valid", True)
+        auth_invalid = False
+        if isinstance(auth_value, str):
+            auth_invalid = auth_value.strip().lower() in {"false", "0", "no", "n", "invalid"}
+        else:
+            auth_invalid = not bool(auth_value)
+        if auth_invalid:
+            reasons.append("invalid_auth_token")
+            score += 5.0
+
+        if avg_length > 0 and float(row.get("length", 0.0)) > (2.0 * avg_length):
+            reasons.append("abnormal_payload_spike")
+            score += 3.0
+
+        if idx > 0 and float(row.get("iat_ms", 0.0)) >= 1.0:
+            z_len = abs(float(_track_a_robust_zscore(pd.Series(analyzed.loc[:idx, "length"].astype(float))).iloc[-1]))
+            score += min(1.0, z_len * 0.2)
+
+        if reasons:
+            analyzed.at[idx, "anomaly_score"] = round(score, 3)
+            analyzed.at[idx, "suspicion_reason"] = ";".join(dict.fromkeys(reasons))
+            analyzed.at[idx, "is_suspicious"] = True
 
     return analyzed
+
+
+def _track_a_detect_anomalies(df: pd.DataFrame) -> pd.DataFrame:
+    analyzed = _track_a_prepare_analysis(df)
+    anomalous = analyzed.loc[analyzed["is_suspicious"]].copy()
+    if anomalous.empty:
+        return pd.DataFrame(columns=["timestamp", "source", "destination", "length", "iat_ms", "anomaly_score", "suspicion_reason"])
+
+    return anomalous[["timestamp", "source", "destination", "length", "iat_ms", "anomaly_score", "suspicion_reason"]].sort_values("anomaly_score", ascending=False).reset_index(drop=True)
 
 
 def _track_a_detect_replays(analyzed_df: pd.DataFrame, min_gap_s: float = 0.03) -> pd.DataFrame:
@@ -1909,10 +1966,11 @@ track_a_upload = st.file_uploader(
 if track_a_upload is not None:
     try:
         uploaded_df, mapping_report = _track_a_parse_uploaded(track_a_upload)
-        track_a_analyzed = _track_a_detect_anomalies(uploaded_df)
+        track_a_analyzed = _track_a_prepare_analysis(uploaded_df)
+        track_a_anomalies = _track_a_detect_anomalies(uploaded_df)
         replay_candidates_df = _track_a_detect_replays(track_a_analyzed)
 
-        suspicious_count = int(track_a_analyzed["is_suspicious"].sum())
+        suspicious_count = int(len(track_a_anomalies))
         suspicious_rate = (suspicious_count / max(1, len(track_a_analyzed))) * 100.0
         replay_count = int(len(replay_candidates_df))
         track_a_status = "HARDENED" if replay_count == 0 and suspicious_rate < 8.0 else "COMPROMISED"
@@ -1981,8 +2039,7 @@ if track_a_upload is not None:
         st.markdown('</div>', unsafe_allow_html=True)
 
         _section_title("TRACK A Findings", "Suspicious packets and replay-style sequence candidates")
-        suspicious_rows = track_a_analyzed[track_a_analyzed["is_suspicious"]].copy()
-        suspicious_rows = suspicious_rows[["timestamp", "source", "destination", "length", "iat_ms", "anomaly_score", "suspicion_reason"]].sort_values("anomaly_score", ascending=False).head(250)
+        suspicious_rows = track_a_anomalies.copy().sort_values("anomaly_score", ascending=False).head(250)
         st.markdown('<div class="ops-card"><div class="scope-title">Statistical anomalies (timing/size)</div></div>', unsafe_allow_html=True)
         st.dataframe(suspicious_rows, use_container_width=True, hide_index=True)
 
