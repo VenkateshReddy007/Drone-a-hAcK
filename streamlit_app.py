@@ -6,6 +6,7 @@ import json
 import os
 from collections import Counter
 from html import escape
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import perf_counter
 from typing import Dict, Set
@@ -14,6 +15,7 @@ import urllib.error
 import urllib.request
 
 import altair as alt
+import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 
@@ -27,26 +29,597 @@ st.set_page_config(page_title="QSHIELD Tactical Console", page_icon="🛡️", l
 st.markdown(
     """
     <style>
-    .stApp { background-color: #0a0a1a; color: #d8fbe8; }
-    .main .block-container { padding-top: 4rem; padding-bottom: 1rem; max-width: 96rem; }
-    [data-testid="stMetricValue"] { color: #00ff88; }
-    [data-testid="stMetricLabel"] { color: #a8bfb1; }
-    .qshield-header {
-        color: #00ff88; font-family: monospace; font-size: 44px; font-weight: 900;
-        line-height: 1; letter-spacing: 1px; text-shadow: 0 0 10px rgba(0, 255, 136, 0.28);
-        margin-bottom: 0;
+    :root {
+        --bg: #0a0f1e;
+        --card: #111827;
+        --border: #1e3a5f;
+        --text: #e8e8e8;
+        --saffron: #ff9933;
+        --green: #138808;
+        --cyan: #00d4ff;
+        --alert: #ff3333;
+        --safe: #00ff88;
+        --muted: #8fa3b8;
     }
-    .qshield-sub { color: #8cb6a1; font-family: monospace; font-size: 13px; margin-top: 0; }
+    html, body, .stApp, .main {
+        background: var(--bg) !important;
+        color: var(--text) !important;
+        font-family: "Courier New", monospace !important;
+    }
+    .stApp { background: linear-gradient(180deg, #0a0f1e 0%, #08101d 52%, #060b14 100%); }
+    .main .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2.6rem;
+        max-width: 96rem;
+    }
+    [data-testid="stSidebar"] {
+        background: linear-gradient(180deg, rgba(12,18,31,0.98), rgba(7,12,22,0.98));
+        border-right: 1px solid rgba(30, 58, 95, 0.9);
+        position: relative;
+    }
+    [data-testid="stSidebar"]::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 6px;
+        background: linear-gradient(180deg, #ff9933 0%, #ffffff 50%, #138808 100%);
+        box-shadow: 0 0 18px rgba(255, 153, 51, 0.25);
+    }
+    [data-testid="stSidebar"] * {
+        font-family: "Courier New", monospace !important;
+    }
+    [data-testid="stSidebar"] label,
+    [data-testid="stSidebar"] p,
+    [data-testid="stSidebar"] span,
+    [data-testid="stSidebar"] div {
+        color: var(--text) !important;
+    }
+    [data-baseweb="slider"] [role="slider"] {
+        background: var(--saffron) !important;
+        box-shadow: 0 0 0 4px rgba(255,153,51,0.12) !important;
+    }
+    [data-baseweb="slider"] div[role="progressbar"] {
+        background: var(--saffron) !important;
+    }
+    [data-baseweb="select"] > div {
+        border-color: rgba(255,153,51,0.45) !important;
+    }
+    [data-baseweb="select"] > div:hover,
+    [data-baseweb="select"] > div:focus-within {
+        border-color: var(--saffron) !important;
+        box-shadow: 0 0 0 1px rgba(255,153,51,0.3) !important;
+    }
+    button[kind="primary"], .stButton > button {
+        background: linear-gradient(180deg, #ffb15f 0%, #ff9933 100%) !important;
+        color: #10131c !important;
+        border: 1px solid rgba(255, 153, 51, 0.7) !important;
+        font-family: "Segoe UI Condensed", "Arial Narrow", sans-serif !important;
+        font-weight: 900 !important;
+        letter-spacing: 0.08em !important;
+        text-transform: uppercase !important;
+        box-shadow: 0 0 18px rgba(255, 153, 51, 0.15) !important;
+    }
+    button[kind="primary"]:hover, .stButton > button:hover {
+        background: linear-gradient(180deg, #ffc47d 0%, #ffad4f 100%) !important;
+    }
+    h1, h2, h3, h4, h5, h6, .section-title {
+        font-family: "Segoe UI Condensed", "Arial Narrow", sans-serif !important;
+        letter-spacing: 0.08em;
+    }
+    .qshield-header-wrap {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 1rem;
+        margin: 0.2rem 0 0.6rem 0;
+    }
+    .qshield-title {
+        margin: 0;
+        font-size: 4rem;
+        line-height: 0.92;
+        font-weight: 900;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--saffron);
+        font-family: "Segoe UI Condensed", "Arial Narrow", sans-serif;
+        text-shadow: 0 0 18px rgba(255, 153, 51, 0.18);
+    }
+    .qshield-title .chakra {
+        color: var(--cyan);
+        margin-left: 0.35rem;
+        text-shadow: 0 0 14px rgba(0, 212, 255, 0.34);
+    }
+    .qshield-sub {
+        color: var(--text);
+        font-family: "Courier New", monospace;
+        font-size: 0.85rem;
+        letter-spacing: 0.32em;
+        text-transform: uppercase;
+        margin: 0.35rem 0 0.4rem 0;
+        opacity: 0.9;
+    }
+    .live-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.55rem;
+        color: #ff6b6b;
+        font-family: "Courier New", monospace;
+        font-size: 0.82rem;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        white-space: nowrap;
+    }
+    .live-dot {
+        width: 11px;
+        height: 11px;
+        border-radius: 50%;
+        background: #ff3333;
+        box-shadow: 0 0 0 0 rgba(255, 51, 51, 0.55);
+        animation: livePulse 1.4s infinite;
+    }
+    @keyframes livePulse {
+        0% { box-shadow: 0 0 0 0 rgba(255, 51, 51, 0.45); transform: scale(1); }
+        70% { box-shadow: 0 0 0 12px rgba(255, 51, 51, 0); transform: scale(1.05); }
+        100% { box-shadow: 0 0 0 0 rgba(255, 51, 51, 0); transform: scale(1); }
+    }
+    .tricolor-line {
+        height: 4px;
+        border-radius: 999px;
+        background: linear-gradient(90deg, #ff9933 0 33%, #ffffff 33% 66%, #138808 66% 100%);
+        margin: 0.3rem 0 1rem 0;
+        box-shadow: 0 0 12px rgba(255, 255, 255, 0.08);
+    }
+    .ist-clock {
+        margin-left: auto;
+        text-align: right;
+        padding: 0.7rem 0.9rem;
+        border: 1px solid rgba(30, 58, 95, 0.85);
+        border-radius: 12px;
+        background: rgba(17, 24, 39, 0.82);
+        color: var(--text);
+        font-family: "Courier New", monospace;
+        font-size: 0.85rem;
+        letter-spacing: 0.1em;
+        min-width: 15rem;
+    }
+    .ist-clock .stamp {
+        color: var(--cyan);
+        font-size: 1.05rem;
+        font-weight: 900;
+    }
+    .sidebar-header {
+        color: var(--saffron);
+        font-family: "Segoe UI Condensed", "Arial Narrow", sans-serif;
+        font-size: 1.15rem;
+        font-weight: 900;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        margin: 0.4rem 0 1rem 0;
+    }
+    .scope-title {
+        color: var(--safe);
+        font-family: "Segoe UI Condensed", "Arial Narrow", sans-serif;
+        font-size: 1rem;
+        font-weight: 900;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        margin-bottom: 0.2rem;
+    }
     .scope-box {
-        background: linear-gradient(180deg, rgba(16, 16, 36, 0.98), rgba(9, 9, 26, 0.98));
-        border: 1px solid rgba(0, 255, 136, 0.18); border-radius: 12px;
-        padding: 0.9rem 1rem; margin: 0.3rem 0 0.9rem 0; font-family: monospace;
+        background: linear-gradient(180deg, rgba(17, 24, 39, 0.98), rgba(11, 18, 30, 0.98));
+        border: 1px solid rgba(30, 58, 95, 0.95);
+        border-radius: 15px;
+        padding: 0.95rem 1rem 0.9rem 1rem;
+        margin: 0.35rem 0 0.9rem 0;
+        font-family: "Courier New", monospace;
     }
-    .scope-title { color: #00ff88; font-size: 16px; font-weight: 900; margin-bottom: 0.2rem; }
+    .metric-grid {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 0.8rem;
+        margin: 0.4rem 0 0.85rem 0;
+    }
+    .metric-card {
+        position: relative;
+        background: linear-gradient(180deg, rgba(17, 24, 39, 0.98), rgba(11, 18, 30, 0.98));
+        border: 1px solid rgba(30, 58, 95, 0.95);
+        border-top: 4px solid var(--saffron);
+        border-radius: 15px;
+        padding: 0.95rem 1rem 0.9rem 1rem;
+        min-height: 112px;
+        overflow: hidden;
+    }
+    .metric-card::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: radial-gradient(circle at top right, rgba(0, 212, 255, 0.11), transparent 35%);
+        pointer-events: none;
+    }
+    .metric-card .label {
+        color: #b7c4d7;
+        font-size: 0.74rem;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        font-family: "Courier New", monospace;
+    }
+    .metric-card .value {
+        margin-top: 0.35rem;
+        color: var(--safe);
+        font-size: 2rem;
+        font-weight: 900;
+        line-height: 1.02;
+        font-family: "Segoe UI Condensed", "Arial Narrow", sans-serif;
+    }
+    .metric-card .icon {
+        position: absolute;
+        top: 0.72rem;
+        right: 0.9rem;
+        color: var(--cyan);
+        font-size: 1.15rem;
+    }
+    .metric-card--threat.pulse {
+        animation: threatPulse 1.4s ease-in-out infinite;
+    }
+    @keyframes threatPulse {
+        0%, 100% { box-shadow: 0 0 0 0 rgba(255, 51, 51, 0.0); transform: translateY(0); }
+        50% { box-shadow: 0 0 0 8px rgba(255, 51, 51, 0.12); transform: translateY(-1px); }
+    }
+    .mission-card {
+        position: relative;
+        margin-top: 0.8rem;
+        padding: 1.2rem 1.25rem;
+        background: linear-gradient(180deg, rgba(15, 23, 42, 0.97), rgba(9, 14, 24, 0.98));
+        border-radius: 18px;
+        border: 1px solid rgba(30, 58, 95, 0.92);
+        border-left: 6px solid var(--safe);
+        overflow: hidden;
+    }
+    .mission-card.compromised { border-left-color: var(--alert); }
+    .mission-card.medium { border-left-color: #ffbf47; }
+    .mission-card::before {
+        content: "भारत रक्षा";
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        font-size: 5rem;
+        font-weight: 900;
+        letter-spacing: 0.18em;
+        color: rgba(255, 255, 255, 0.045);
+        transform: rotate(-12deg);
+        pointer-events: none;
+        font-family: "Segoe UI Condensed", "Arial Narrow", sans-serif;
+        text-transform: uppercase;
+    }
+    .mission-card .title {
+        color: var(--safe);
+        font-family: "Segoe UI Condensed", "Arial Narrow", sans-serif;
+        font-size: 1.35rem;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        font-weight: 900;
+    }
+    .mission-card .title.compromised { color: var(--alert); }
+    .mission-card .title.medium { color: #ffbf47; }
+    .mission-card .radio {
+        margin-top: 0.75rem;
+        padding: 0.85rem 1rem;
+        border-radius: 12px;
+        border: 1px solid rgba(0, 212, 255, 0.2);
+        background: rgba(7, 13, 22, 0.68);
+        font-family: "Courier New", monospace;
+        color: #d9ebff;
+        white-space: pre-wrap;
+        line-height: 1.55;
+    }
+    .ops-section-title {
+        color: #f7f7f7;
+        border-left: 5px solid var(--saffron);
+        padding-left: 0.75rem;
+        margin: 1.15rem 0 0.55rem 0;
+        font-size: 1.45rem;
+        font-weight: 900;
+        text-transform: uppercase;
+    }
+    .ops-subtitle {
+        color: var(--muted);
+        font-size: 0.82rem;
+        margin: -0.15rem 0 0.7rem 0.85rem;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        font-family: "Courier New", monospace;
+    }
+    .section-shell {
+        border-left: 5px solid var(--saffron);
+        padding-left: 0.9rem;
+        margin-top: 1rem;
+    }
+    .ops-card {
+        background: linear-gradient(180deg, rgba(17, 24, 39, 0.98), rgba(11, 16, 26, 0.98));
+        border: 1px solid rgba(30, 58, 95, 0.9);
+        border-radius: 16px;
+        padding: 1rem 1.1rem;
+        margin: 0.35rem 0 0.9rem 0;
+        position: relative;
+    }
+    .ops-card::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 4px;
+        background: linear-gradient(180deg, #ff9933, #138808);
+        border-radius: 16px 0 0 16px;
+    }
+    .status-badge {
+        display: inline-block;
+        padding: 0.3rem 0.65rem;
+        border-radius: 999px;
+        font-size: 0.72rem;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        font-family: "Courier New", monospace;
+        background: rgba(255,255,255,0.04);
+        border: 1px solid rgba(255,255,255,0.08);
+    }
+    .status-badge.safe { color: var(--safe); }
+    .status-badge.alert { color: var(--alert); }
+    .ops-table {
+        width: 100%;
+        border-collapse: collapse;
+        overflow: hidden;
+        border-radius: 16px;
+        background: var(--card);
+        border: 1px solid rgba(30, 58, 95, 0.9);
+        font-family: "Courier New", monospace;
+    }
+    .ops-table thead th {
+        color: var(--saffron);
+        text-transform: uppercase;
+        letter-spacing: 0.14em;
+        font-size: 0.72rem;
+        padding: 0.95rem 0.85rem;
+        border-bottom: 1px solid rgba(255, 153, 51, 0.2);
+        text-align: left;
+    }
+    .ops-table tbody td {
+        padding: 0.88rem 0.85rem;
+        border-bottom: 1px solid rgba(30, 58, 95, 0.55);
+        color: var(--text);
+        vertical-align: top;
+    }
+    .ops-table tbody tr.pass {
+        border-left: 4px solid var(--safe);
+    }
+    .ops-table tbody tr.pass td:first-child {
+        color: var(--safe);
+    }
+    .ops-table tbody tr.fail {
+        border-left: 4px solid var(--alert);
+    }
+    .ops-table tbody tr.fail td {
+        color: #ff7a7a;
+    }
+    .ops-table tbody tr.fail td:first-child::before {
+        content: "⚠️ ";
+    }
+    .timeline {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 0.85rem;
+        margin-top: 0.6rem;
+        align-items: stretch;
+    }
+    .timeline-phase {
+        position: relative;
+        padding: 0.9rem 0.8rem 0.8rem 0.8rem;
+        border-radius: 14px;
+        background: rgba(17, 24, 39, 0.88);
+        border: 1px solid rgba(30, 58, 95, 0.9);
+        min-height: 120px;
+    }
+    .timeline-phase .dot {
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        display: inline-block;
+        margin-bottom: 0.6rem;
+        background: #7a7f8b;
+        box-shadow: 0 0 0 4px rgba(255,255,255,0.04);
+    }
+    .timeline-phase.active .dot {
+        background: var(--saffron);
+        box-shadow: 0 0 0 5px rgba(255,153,51,0.12), 0 0 18px rgba(255,153,51,0.25);
+    }
+    .timeline-phase .phase-name {
+        color: #f4f7fb;
+        font-size: 0.92rem;
+        font-weight: 900;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+    }
+    .timeline-phase.active .phase-name {
+        color: var(--saffron);
+    }
+    .timeline-phase .phase-goal {
+        margin-top: 0.4rem;
+        color: var(--text);
+        font-size: 0.8rem;
+        line-height: 1.45;
+    }
+    .timeline-phase.future .phase-goal {
+        color: var(--cyan);
+    }
+    .timeline-title {
+        color: var(--saffron);
+        font-size: 1.5rem;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        font-family: "Segoe UI Condensed", "Arial Narrow", sans-serif;
+        font-weight: 900;
+        margin: 0.25rem 0 0.7rem 0;
+    }
+    .footer-wrap {
+        margin-top: 1.8rem;
+        padding-top: 0.8rem;
+        border-top: 1px solid rgba(30, 58, 95, 0.8);
+        color: #b9c6d4;
+        font-family: "Courier New", monospace;
+        font-size: 0.8rem;
+        letter-spacing: 0.08em;
+        text-align: center;
+    }
+    .footer-line {
+        height: 3px;
+        border-radius: 999px;
+        background: linear-gradient(90deg, #ff9933 0 33%, #ffffff 33% 66%, #138808 66% 100%);
+        margin: 0 0 0.7rem 0;
+    }
+    .chart-frame {
+        background: #0d1117;
+        border: 1px solid rgba(30, 58, 95, 0.95);
+        border-radius: 16px;
+        padding: 0.45rem 0.45rem 0.2rem 0.45rem;
+        margin-bottom: 0.85rem;
+    }
+    .chart-note {
+        color: var(--muted);
+        font-family: "Courier New", monospace;
+        font-size: 0.8rem;
+        letter-spacing: 0.08em;
+        margin: 0.1rem 0 0.55rem 0.95rem;
+    }
+    .watermark-note {
+        color: rgba(232,232,232,0.34);
+        font-family: "Segoe UI Condensed", "Arial Narrow", sans-serif;
+        letter-spacing: 0.2em;
+        text-transform: uppercase;
+    }
+    .stMarkdown, .stCaption, .stInfo, .stDataFrame, .stTable {
+        color: var(--text) !important;
+        font-family: "Courier New", monospace !important;
+    }
+    .stDataFrame, [data-testid="stTable"] {
+        border-radius: 14px;
+        overflow: hidden;
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
+
+
+def _ist_now_label() -> str:
+    ist = timezone(timedelta(hours=5, minutes=30))
+    return datetime.now(ist).strftime("%d %b %Y | %H:%M:%S IST")
+
+
+def _metric_card(label: str, value: str, icon: str, pulse: bool = False, large: bool = False, value_color: str | None = None) -> str:
+    extra_class = " pulse" if pulse else ""
+    large_class = " metric-card--large" if large else ""
+    value_style = f"color:{value_color};" if value_color else ""
+    return (
+        f'<div class="metric-card metric-card--threat{extra_class}{large_class}">'
+        f'<div class="icon">{escape(icon)}</div>'
+        f'<div class="label">{escape(label)}</div>'
+        f'<div class="value" style="{value_style}">{escape(value)}</div>'
+        f'</div>'
+    )
+
+
+def _contiguous_windows(sequence_ids: list[int]) -> list[tuple[int, int]]:
+    if not sequence_ids:
+        return []
+    ordered = sorted(sequence_ids)
+    windows: list[tuple[int, int]] = []
+    start = prev = ordered[0]
+    for current in ordered[1:]:
+        if current == prev + 1:
+            prev = current
+            continue
+        windows.append((start, prev))
+        start = prev = current
+    windows.append((start, prev))
+    return windows
+
+
+def _stress_table_html(stress_df: pd.DataFrame) -> str:
+    header = "".join(f"<th>{escape(col.upper())}</th>" for col in ["scenario", "alerts", "attack_packets", "precision", "recall", "false_positives", "threshold", "result"])
+    rows_html = []
+    for row in stress_df.to_dict(orient="records"):
+        is_pass = row["result"] == "PASS"
+        row_class = "pass" if is_pass else "fail"
+        result_text = row["result"] if is_pass else "⚠️ FAIL"
+        cells = [
+            row["scenario"],
+            row["alerts"],
+            row["attack_packets"],
+            f"{row['precision']:.2f}%",
+            f"{row['recall']:.2f}%",
+            row["false_positives"],
+            row["threshold"],
+            result_text,
+        ]
+        rows_html.append(
+            f'<tr class="{row_class}">' + "".join(f"<td>{escape(str(cell))}</td>" for cell in cells) + "</tr>"
+        )
+    return (
+        '<table class="ops-table">'
+        f"<thead><tr>{header}</tr></thead>"
+        f"<tbody>{''.join(rows_html)}</tbody>"
+        "</table>"
+    )
+
+
+def _roadmap_html(roadmap_df: pd.DataFrame) -> str:
+    cards = []
+    total = len(roadmap_df)
+    for idx, row in roadmap_df.iterrows():
+        active = idx == 0
+        cls = "timeline-phase active" if active else "timeline-phase future"
+        connector = '<div style="position:absolute;top:21px;right:-8px;width:16px;height:2px;background:rgba(30,58,95,0.9);"></div>' if idx < total - 1 else ""
+        cards.append(
+            f'<div class="{cls}">'
+            f'<span class="dot"></span>'
+            f'<div class="phase-name">{escape(str(row["phase"]))}</div>'
+            f'<div class="phase-goal"><b>{escape(str(row["goal"]))}</b><br/>{escape(str(row["deliverable"]))}</div>'
+            f'{connector}'
+            f'</div>'
+        )
+    return '<div class="timeline">' + "".join(cards) + '</div>'
+
+
+def _render_radar_chart(coverage_map: Dict[str, float]) -> None:
+    labels = ["Replay", "Spoof", "Timing"]
+    values = [coverage_map.get("replay", 0.0), coverage_map.get("spoof", 0.0), coverage_map.get("timing_side_channel", 0.0)]
+    values += values[:1]
+    angles = [index / float(len(labels)) * 2 * 3.141592653589793 for index in range(len(labels))]
+    angles += angles[:1]
+
+    fig = plt.figure(figsize=(6.6, 6.0), facecolor="#0d1117")
+    ax = plt.subplot(111, polar=True, facecolor="#0d1117")
+    ax.plot(angles, values, color="#ff9933", linewidth=2.4)
+    ax.fill(angles, values, color="#00d4ff", alpha=0.22)
+    ax.set_xticks(angles[:-1])
+    ax.set_xticklabels(labels, color="#e8e8e8", fontfamily="monospace", fontsize=11)
+    ax.set_yticklabels([])
+    ax.set_ylim(0, 100)
+    ax.grid(color="white", alpha=0.1, linestyle="--", linewidth=0.8)
+    ax.spines["polar"].set_color("#1e3a5f")
+    ax.spines["polar"].set_linewidth(1.2)
+    ax.set_title("Threat Coverage Radar", color="#ff9933", fontweight="bold", fontsize=14, pad=18)
+    st.pyplot(fig, use_container_width=True)
+    plt.close(fig)
+
+
+def _section_title(title: str, subtitle: str | None = None) -> None:
+    st.markdown(f'<div class="ops-section-title">{escape(title)}</div>', unsafe_allow_html=True)
+    if subtitle:
+        st.markdown(f'<div class="ops-subtitle">{escape(subtitle)}</div>', unsafe_allow_html=True)
 
 
 def _at(total_packets: int, frac: float) -> int:
@@ -471,11 +1044,36 @@ def build_analysis_agent(profile: str, packet_count: int, seed: int, packets, re
         "explanation": explanation,
     }
 
-
-st.markdown('<p class="qshield-header">QSHIELD // CYBER OPS CONSOLE</p>', unsafe_allow_html=True)
-st.markdown('<p class="qshield-sub">CLASSICAL CHANNEL PROTECTION FOR QKD-ASSISTED DRONE COMMS</p>', unsafe_allow_html=True)
+header_col, clock_col = st.columns([3.3, 1.1])
+with header_col:
+    st.markdown(
+        """
+        <div class="qshield-header-wrap">
+          <div>
+            <div class="qshield-title">QSHIELD <span class="chakra">⊕</span></div>
+            <div class="qshield-sub">CLASSICAL CHANNEL PROTECTION FOR QKD-ASSISTED DRONE CORPS</div>
+            <div class="live-pill"><span class="live-dot"></span>LIVE SYSTEM ACTIVE</div>
+          </div>
+        </div>
+        <div class="tricolor-line"></div>
+        """,
+        unsafe_allow_html=True,
+    )
+with clock_col:
+    st.markdown(
+        f"""
+        <div class="ist-clock">
+          <div>DATE / TIME</div>
+          <div class="stamp">{_ist_now_label()}</div>
+          <div>INDIAN STANDARD TIME</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 with st.sidebar:
+    st.markdown('<div class="sidebar-header">BHARAT RAKSHA CYBER GRID</div>', unsafe_allow_html=True)
+    st.markdown('<div style="height:6px;background:linear-gradient(90deg,#ff9933 0 33%,#ffffff 33% 66%,#138808 66% 100%);border-radius:999px;margin:0 0 1rem 0"></div>', unsafe_allow_html=True)
     st.header("Scenario Controls")
     packet_count = st.slider("Total packets", min_value=40, max_value=160, value=80, step=5)
     seed = st.number_input("Simulation seed", min_value=1, max_value=99999, value=515, step=1)
@@ -484,7 +1082,7 @@ with st.sidebar:
         ["standard", "stealth_spoof", "burst_replay", "timing_heavy_probe", "mixed_swarm"],
         index=0,
     )
-    run_button = st.button("Run QSHIELD Evaluation", type="primary", use_container_width=True)
+    run_button = st.button("INITIATE QSHIELD EVALUATION", type="primary", use_container_width=True)
     st.caption("Changing controls auto-refreshes the run.")
 
 if "run_data" not in st.session_state:
@@ -528,18 +1126,20 @@ st.caption(
     f"Active run -> profile={run_data['profile']} | packets={len(packets)} | seed={seed} | injected_attacks={active_attack_count}"
 )
 
-status = "HARDENED" if qshield_metrics["recall"] >= 70 else "AT RISK"
-status_color = "#00ff88" if status == "HARDENED" else "#ff4444"
+stress_pass_count = int((stress_df["result"] == "PASS").sum())
+stress_total = len(stress_df)
+mission_status = "HARDENED" if stress_total and stress_pass_count == stress_total and qshield_metrics["precision"] >= 85 and qshield_metrics["recall"] >= 85 else "COMPROMISED"
+verdict_class = "" if verdict["level"] == "HIGH CONFIDENCE" else ("medium" if verdict["level"] == "MODERATE CONFIDENCE" else "compromised")
 
 st.markdown(
-    f"""
-    <div class="scope-box">
-      <div class="scope-title">Mission Verdict: {verdict['level']}</div>
-      <div>Score: {verdict['score']} / 100 | System status: <span style="color:{status_color};font-weight:800">{status}</span></div>
-      <div style="margin-top:0.35rem">20-second spoken brief: {verdict['spoken']}</div>
-    </div>
-    """,
-    unsafe_allow_html=True,
+        f"""
+        <div class="mission-card {verdict_class}">
+            <div class="title {verdict_class}">MISSION STATUS // {mission_status}</div>
+            <div style="margin-top:0.45rem;color:#dbe6f5;font-family:'Courier New', monospace;">Score: {verdict['score']} / 100 | Verdict: {verdict['level']} | Stress matrix hardening: {stress_pass_count}/{stress_total}</div>
+            <div class="radio"><span class="watermark-note">20-second radio brief</span>\n{escape(verdict['spoken'])}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
 )
 
 # ==== QUANTUM SECURITY POSTURE ANALYSIS ====
@@ -595,11 +1195,11 @@ with st.expander("🔐 Quantum Threat Model & QSHIELD Defense", expanded=False):
     )
 
 ai_agent = build_analysis_agent(profile, int(packet_count), int(seed), packets, result, baseline_metrics, qshield_metrics, stress_df, verdict)
-st.subheader("AI Analysis Agent")
+_section_title("AI Analysis Agent", "Agentic run summary derived from the live profile, seed, and detection metrics")
 st.caption("This explanation is generated from the current run inputs, so it changes when the seed, packet count, or profile changes.")
 st.markdown(
     f"""
-    <div class="scope-box">
+    <div class="ops-card">
         <div class="scope-title">Current Run Summary</div>
         <div style="white-space:pre-wrap; line-height:1.55; margin-top:0.35rem;">{escape(ai_agent['summary'])}</div>
         <div style="margin-top:0.7rem; font-weight:800; color:#00ff88;">Analysis</div>
@@ -609,7 +1209,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.subheader("Ask the Analyst")
+_section_title("Ask the Analyst", "Query the live run context in plain language")
 user_question = st.text_input("Ask a question about the current run", placeholder="Why did recall change on this seed?")
 ask_clicked = st.button("Get analyst answer", use_container_width=False)
 if ask_clicked and user_question.strip():
@@ -626,7 +1226,7 @@ if ask_clicked and user_question.strip():
     )
     st.markdown(
         f"""
-        <div class="scope-box">
+        <div class="ops-card">
           <div class="scope-title">Analyst Answer</div>
           <div style="white-space:pre-wrap; line-height:1.55;">{escape(analyst_answer)}</div>
         </div>
@@ -634,15 +1234,24 @@ if ask_clicked and user_question.strip():
         unsafe_allow_html=True,
     )
 
-m1, m2, m3, m4, m5, m6 = st.columns(6)
-m1.metric("Attack packets (GT)", int(qshield_metrics["attack_packets"]))
-m2.metric("QSHIELD TP", int(qshield_metrics["tp"]))
-m3.metric("QSHIELD FP", int(qshield_metrics["fp"]))
-m4.metric("Precision", f"{qshield_metrics['precision']:.1f}%")
-m5.metric("Recall", f"{qshield_metrics['recall']:.1f}%")
-m6.metric("Latency overhead", f"{(qshield_metrics['ms_per_packet'] - baseline_metrics['ms_per_packet']):.5f} ms/pkt")
+metric_row = st.columns(5)
+metric_row[0].markdown(_metric_card("PACKETS ANALYZED", f"{len(packets)}", "◫"), unsafe_allow_html=True)
+metric_row[1].markdown(_metric_card("THREATS NEUTRALIZED", f"{int(qshield_metrics['tp'])}", "✦", pulse=int(active_attack_count) > 0), unsafe_allow_html=True)
+metric_row[2].markdown(_metric_card("PRECISION", f"{qshield_metrics['precision']:.1f}%", "⌁"), unsafe_allow_html=True)
+metric_row[3].markdown(_metric_card("RECALL", f"{qshield_metrics['recall']:.1f}%", "⌖"), unsafe_allow_html=True)
+metric_row[4].markdown(_metric_card("LATENCY", f"{(qshield_metrics['ms_per_packet'] - baseline_metrics['ms_per_packet']):.5f} ms/pkt", "⟡"), unsafe_allow_html=True)
+st.markdown(
+    _metric_card(
+        "MISSION STATUS",
+        mission_status,
+        "⚑",
+        large=True,
+        value_color="#00ff88" if mission_status == "HARDENED" else "#ff3333",
+    ),
+    unsafe_allow_html=True,
+)
 
-st.subheader("Baseline vs QSHIELD")
+_section_title("Baseline vs QSHIELD", "Executive comparison of core detection metrics")
 comparison_df = pd.DataFrame(
     [
         {"metric": "precision", "baseline": baseline_metrics["precision"], "qshield": qshield_metrics["precision"]},
@@ -661,14 +1270,19 @@ comp_chart = (
         column=alt.Column("system:N", title=None),
         tooltip=["metric", "system", "value"],
     )
-    .properties(height=220)
+    .properties(height=420, width=330, background="#0d1117")
+    .configure_view(stroke=None)
+    .configure_axis(gridColor="rgba(255,255,255,0.1)", gridDash=[2, 4], labelColor="#e8e8e8", titleColor="#e8e8e8")
+    .configure_title(color="#ff9933", font="Segoe UI Condensed", fontSize=14)
 )
+st.markdown('<div class="chart-frame">', unsafe_allow_html=True)
 st.altair_chart(comp_chart, use_container_width=True)
+st.markdown('</div>', unsafe_allow_html=True)
 
 st.divider()
 
 # ==== QUANTUM SECURITY ADVANTAGE CHART ====
-st.subheader("Quantum-Safe Architecture: Classical vs. QSHIELD+QKD")
+_section_title("Quantum-Safe Architecture: Classical vs. QSHIELD+QKD", "Harvest now decrypt later threat — this is why quantum matters")
 quantum_df = pd.DataFrame({
     "dimension": [
         "Detection Coverage (recall)",
@@ -691,19 +1305,24 @@ q_chart = (
     .encode(
         x=alt.X("dimension:N", title=None),
         y=alt.Y("score:Q", title="Security Score (%)", scale=alt.Scale(domain=[0, 100])),
-        color=alt.Color("system:N", scale=alt.Scale(range=["#555555", "#00ff88"]), legend=alt.Legend(title="Architecture")),
+        color=alt.Color("system:N", scale=alt.Scale(range=["#ff3333", "#00d4ff"]), legend=alt.Legend(title="Architecture")),
         tooltip=["dimension", "system", "score"],
     )
-    .properties(height=280)
+    .properties(height=420, background="#0d1117")
+    .configure_view(stroke=None)
+    .configure_axis(gridColor="rgba(255,255,255,0.1)", gridDash=[2, 4], labelColor="#e8e8e8", titleColor="#e8e8e8")
+    .configure_title(color="#ff9933", font="Segoe UI Condensed", fontSize=14)
 )
+st.markdown('<div class="chart-frame">', unsafe_allow_html=True)
 st.altair_chart(q_chart, use_container_width=True)
+st.markdown('</div>', unsafe_allow_html=True)
 st.caption(
-    "📊 Quantum-Safe Score: QSHIELD detection + per-packet QKD keys eliminate Harvest-Now-Decrypt-Later attack surface. "
+    "Quantum-Safe Score: QSHIELD detection + per-packet QKD keys eliminate Harvest-Now-Decrypt-Later attack surface. "
     "Classical encryption alone offers 0% quantum-safe protection; stored traffic is harvested and decrypted in 10-15 years."
 )
 
 st.divider()
-st.subheader("Primary Analysis")
+_section_title("Primary Analysis", "Signal timeline, timing channel, and vector coverage")
 
 attack_sequences = {alert.sequence_id for alert in result.alerts}
 packet_df = pd.DataFrame(
@@ -722,6 +1341,9 @@ packet_df = pd.DataFrame(
     ]
 )
 
+threat_windows = _contiguous_windows([packet.sequence_id for packet in packets if packet.sequence_id in attack_sequences])
+window_df = pd.DataFrame([{"start": start - 0.5, "end": end + 0.5} for start, end in threat_windows])
+
 signal_line = (
     alt.Chart(packet_df)
     .mark_line(color="#00ff88", strokeWidth=2.2)
@@ -731,25 +1353,53 @@ signal_line = (
         tooltip=["sequence", "signal_dbm", "command", "source_identity"],
     )
 )
+signal_windows = (
+    alt.Chart(window_df)
+    .mark_rect(color="#ff3333", opacity=0.14)
+    .encode(x="start:Q", x2="end:Q")
+    if not window_df.empty
+    else alt.Chart(pd.DataFrame({"start": [], "end": []})).mark_rect()
+)
 signal_points = (
     alt.Chart(packet_df[packet_df["is_attack"]])
     .mark_point(color="#ff4444", shape="diamond", size=120, filled=True)
     .encode(x="sequence:Q", y="signal_dbm:Q", tooltip=["sequence", "command", "source_identity"])
 )
-st.altair_chart((signal_line + signal_points).properties(height=360, title="Signal Integrity Timeline"), use_container_width=True)
+signal_chart = (signal_windows + signal_line + signal_points).properties(height=420, title="Signal Integrity Timeline", background="#0d1117")
+signal_chart = signal_chart.configure_view(stroke=None).configure_axis(gridColor="rgba(255,255,255,0.1)", gridDash=[2, 4], labelColor="#e8e8e8", titleColor="#e8e8e8").configure_title(color="#ff9933", font="Segoe UI Condensed", fontSize=14)
+st.markdown('<div class="chart-frame">', unsafe_allow_html=True)
+st.altair_chart(signal_chart, use_container_width=True)
+st.markdown('</div>', unsafe_allow_html=True)
 
+timing_subset = packet_df[packet_df["is_key_exchange"]].copy()
+anomaly_threshold = 0.0
+if not timing_subset.empty:
+    base_timing = timing_subset.loc[~timing_subset["is_attack"], "response_ms"]
+    if len(base_timing) >= 2:
+        anomaly_threshold = float(base_timing.mean() + base_timing.std(ddof=0) * 3)
+    else:
+        anomaly_threshold = float(timing_subset["response_ms"].mean())
 timing_chart = (
-    alt.Chart(packet_df[packet_df["is_key_exchange"]])
-    .mark_bar(size=20)
+    alt.Chart(timing_subset)
+    .mark_bar(size=22)
     .encode(
         x=alt.X("sequence:Q", title="Key Exchange Sequence"),
         y=alt.Y("response_ms:Q", title="Response Time (ms)"),
-        color=alt.condition(alt.datum.is_attack, alt.value("#ff4444"), alt.value("#ff8800")),
+        color=alt.condition(alt.datum.is_attack, alt.value("#ff3333"), alt.value("#00d4ff")),
         tooltip=["sequence", "response_ms", "event", "command"],
     )
-    .properties(height=250, title="Timing Side-Channel Window")
+    .properties(height=420, title="Timing Side-Channel Window", background="#0d1117")
+    .configure_view(stroke=None)
+    .configure_axis(gridColor="rgba(255,255,255,0.1)", gridDash=[2, 4], labelColor="#e8e8e8", titleColor="#e8e8e8")
+    .configure_title(color="#ff9933", font="Segoe UI Condensed", fontSize=14)
 )
+if anomaly_threshold:
+    threshold_rule = alt.Chart(pd.DataFrame({"threshold": [anomaly_threshold]})).mark_rule(color="#ff9933", strokeDash=[8, 6]).encode(y="threshold:Q")
+    threshold_label = alt.Chart(pd.DataFrame({"threshold": [anomaly_threshold]})).mark_text(color="#ff9933", align="left", dx=6, dy=-6, fontWeight="bold").encode(y="threshold:Q", text=alt.value("ANOMALY THRESHOLD"))
+    timing_chart = timing_chart + threshold_rule + threshold_label
+st.markdown('<div class="chart-frame">', unsafe_allow_html=True)
 st.altair_chart(timing_chart, use_container_width=True)
+st.markdown('</div>', unsafe_allow_html=True)
 
 breakdown = Counter(alert.attack_type for alert in result.alerts)
 breakdown_df = pd.DataFrame(
@@ -762,6 +1412,7 @@ breakdown_df = pd.DataFrame(
         ],
     }
 )
+st.markdown('<div class="chart-frame">', unsafe_allow_html=True)
 st.altair_chart(
     alt.Chart(breakdown_df)
     .mark_bar()
@@ -770,9 +1421,22 @@ st.altair_chart(
         y=alt.Y("count:Q", title="Alert Count"),
         color=alt.Color("attack_type:N", legend=None, scale=alt.Scale(range=["#ff8800", "#ff4444", "#ff6655"])),
     )
-    .properties(height=220, title="Attack Breakdown"),
+    .properties(height=420, title="Attack Breakdown", background="#0d1117")
+    .configure_view(stroke=None)
+    .configure_axis(gridColor="rgba(255,255,255,0.1)", gridDash=[2, 4], labelColor="#e8e8e8", titleColor="#e8e8e8")
+    .configure_title(color="#ff9933", font="Segoe UI Condensed", fontSize=14),
     use_container_width=True,
 )
+st.markdown('</div>', unsafe_allow_html=True)
+
+coverage_map = {}
+for attack_name in ["replay", "spoof", "timing_side_channel"]:
+    detected = sum(1 for alert in result.alerts if alert.attack_type == attack_name)
+    attack_total = sum(1 for packet in packets if packet.packet_kind == attack_name or (attack_name == "timing_side_channel" and packet.packet_kind == "timing_probe"))
+    coverage_map[attack_name] = (detected / attack_total * 100) if attack_total else 0.0
+
+_section_title("Threat Coverage Radar", "Circular coverage view across replay, spoof, and timing vectors")
+_render_radar_chart(coverage_map)
 
 show_composite = st.toggle("Show command-center composite image", value=False)
 if show_composite:
@@ -783,11 +1447,12 @@ if show_composite:
     st.image(str(output_path), use_container_width=True)
 
 st.divider()
-st.subheader("Scenario Stress Matrix")
-st.caption("Auto-run validation across stealth spoof, burst replay, timing-heavy probe, and mixed swarm profiles.")
-st.dataframe(stress_df, use_container_width=True, hide_index=True)
 
-st.subheader("Alert Explainability")
+_section_title("Scenario Stress Matrix", "Auto-run validation across stealth spoof, burst replay, timing-heavy probe, and mixed swarm profiles")
+st.markdown(_stress_table_html(stress_df), unsafe_allow_html=True)
+st.markdown(f'<div class="ops-subtitle">{stress_pass_count} of {stress_total} scenarios hardened</div>', unsafe_allow_html=True)
+
+_section_title("Alert Explainability", "Why each alert was fired and what to do next")
 rule_map = {
     "replay": "SHA256 duplicate payload fingerprint",
     "spoof": "Identity/token pattern and RF baseline mismatch",
@@ -806,7 +1471,7 @@ if result.alerts:
     chosen = result.alerts[selected_index]
     st.markdown(
         f"""
-        <div class="scope-box">
+        <div class="ops-card">
             <div class="scope-title">Explainability Trace</div>
             <div><b>Sequence:</b> {chosen.sequence_id}</div>
             <div><b>Rule fired:</b> {rule_map.get(chosen.attack_type, 'N/A')}</div>
@@ -820,7 +1485,7 @@ if result.alerts:
 else:
     st.info("No alerts detected in this run.")
 
-st.subheader("Roadmap to Real RF Deployment")
+_section_title("OPERATION QSHIELD", "Mission timeline for moving from simulation to field deployment")
 roadmap_df = pd.DataFrame(
     [
         {"phase": "Today", "goal": "Simulation-grade detection and QKD simulation", "deliverable": "Validated stress matrix + quantum threat analysis"},
@@ -830,9 +1495,9 @@ roadmap_df = pd.DataFrame(
         {"phase": "12 Months", "goal": "Deploy across Army drone fleet (5000+ platforms)", "deliverable": "Enterprise QKD distribution network + security operations center"},
     ]
 )
-st.table(roadmap_df)
+st.markdown(_roadmap_html(roadmap_df), unsafe_allow_html=True)
 
-st.subheader("One-Click Executive Artifacts")
+_section_title("One-Click Executive Artifacts", "Downloadable briefs, logs, and mission appendix")
 latest_alerts_df = pd.DataFrame(
     [
         {
@@ -910,5 +1575,27 @@ st.download_button(
     data=quantum_detection_brief,
     file_name="qshield_quantum_threat_analysis.txt",
     use_container_width=True,
+)
+
+st.markdown(
+        """
+        <div class="footer-wrap">
+            <div class="footer-line"></div>
+            Developed for 515 Army Base Workshop | Operation Crack The Uncrackable | April 4 2026<br/>
+            Powered by QSHIELD v1.0 | Securing India's Skies
+        </div>
+        """,
+        unsafe_allow_html=True,
+)
+
+st.markdown(
+        """
+        <div class="footer-wrap">
+            <div class="footer-line"></div>
+            Developed for 515 Army Base Workshop | Operation Crack The Uncrackable | April 4 2026<br/>
+            Powered by QSHIELD v1.0 | Securing India's Skies
+        </div>
+        """,
+        unsafe_allow_html=True,
 )
 
