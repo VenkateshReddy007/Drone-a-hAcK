@@ -1,7 +1,5 @@
 # QSHIELD Drone RF Security Demo
 
-**Live Deployment:** https://drone-a-hackgit-og9bik7i8xgnuf7eqeappgv.streamlit.app
-
 ## Overview
 
 QSHIELD is a tactical RF security evaluation framework for drone command-and-control systems. This Streamlit dashboard demonstrates quantum-safe detection of replay attacks, spoofing, and timing side-channel exploits.
