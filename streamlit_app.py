@@ -1215,7 +1215,7 @@ def _run_uart_uploaded_analysis(uploaded_file) -> dict[str, object]:
 
         stdout_capture = io.StringIO()
         with contextlib.redirect_stdout(stdout_capture):
-            analyze_uart_capture(input_path, tmp_path)
+            analyze_uart_capture(input_path, tmp_path, fast_mode=True)
 
         outputs = {
             "dashboard_name": "uart_dashboard.png",

@@ -285,7 +285,7 @@ def _packet_distribution(packets: pd.DataFrame) -> dict[str, float]:
     return percentages.to_dict()
 
 
-def _detect_repeated_packets(packets: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+def _detect_repeated_packets(packets: pd.DataFrame, fast_mode: bool = False) -> tuple[pd.DataFrame, pd.DataFrame]:
     exact_rows: list[dict[str, object]] = []
     near_rows: list[dict[str, object]] = []
     exact_row_count = 0
@@ -296,7 +296,8 @@ def _detect_repeated_packets(packets: pd.DataFrame) -> tuple[pd.DataFrame, pd.Da
             continue
         ids = group["packet_id"].to_numpy(dtype=int)
         # Keep representative exact matches without materializing all O(n^2) pairs.
-        sample_ids = ids[: min(len(ids), 24)]
+        sample_size = 10 if fast_mode else 24
+        sample_ids = ids[: min(len(ids), sample_size)]
         for left, right in combinations(sample_ids, 2):
             exact_rows.append(
                 {
@@ -313,6 +314,13 @@ def _detect_repeated_packets(packets: pd.DataFrame) -> tuple[pd.DataFrame, pd.Da
                 break
         if exact_row_count >= MAX_EXACT_PAIR_ROWS:
             break
+
+    if fast_mode:
+        exact_matches = pd.DataFrame.from_records(exact_rows)
+        near_matches = pd.DataFrame(columns=["packet_a", "packet_b", "packet_id_a", "packet_id_b", "distance", "packet_hex"])
+        if exact_matches.empty:
+            exact_matches = pd.DataFrame(columns=["packet_a", "packet_b", "packet_id_a", "packet_id_b", "distance", "packet_hex"])
+        return exact_matches, near_matches
 
     for length, group in packets.groupby("length_bytes", sort=False):
         if near_row_count >= MAX_NEAR_PAIR_ROWS:
@@ -455,6 +463,11 @@ def _build_dashboard(
     replay_fast_threshold: float,
     output_path: Path,
 ) -> None:
+    if len(working) > 60_000:
+        working = working.iloc[:: max(1, len(working) // 60_000)].copy()
+    if len(packets) > 15_000:
+        packets = packets.iloc[:: max(1, len(packets) // 15_000)].copy()
+
     plt.style.use("dark_background")
     fig, axes = plt.subplots(3, 2, figsize=(20, 14), dpi=150)
     fig.patch.set_facecolor(DARK_BG)
@@ -630,7 +643,7 @@ def _format_report(
     return "\n".join(lines)
 
 
-def analyze_uart_capture(input_path: Path, output_dir: Path) -> None:
+def analyze_uart_capture(input_path: Path, output_dir: Path, fast_mode: bool = False) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print("[1/10] Loading UART CSV in 10,000-row chunks...", flush=True)
@@ -677,7 +690,7 @@ def analyze_uart_capture(input_path: Path, output_dir: Path) -> None:
         print(f"  {label}: {packet_dist.get(label, 0.0):.1f}%", flush=True)
 
     print("[7/10] Detecting repeated and near-identical ciphertext packets...", flush=True)
-    exact_matches, near_matches = _detect_repeated_packets(packets)
+    exact_matches, near_matches = _detect_repeated_packets(packets, fast_mode=fast_mode)
     print(f"  exact match pairs: {len(exact_matches):,}", flush=True)
     print(f"  near-identical pairs: {len(near_matches):,}", flush=True)
 
