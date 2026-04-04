@@ -1133,7 +1133,11 @@ def _track_a_ask_agent(question: str, upload_name: str, analyzed_df: pd.DataFram
                     return text
         except urllib.error.HTTPError as error:
             if error.code != 404:
-                return f"Track A analyst request failed with HTTP {error.code}. Falling back to the local dataset summary."
+                fallback = _track_a_local_answer(question, analyzed_df, replay_df)
+                return (
+                    f"Track A analyst request hit HTTP {error.code}, so I switched to local analysis. "
+                    f"{fallback}"
+                )
         except Exception:
             break
 
