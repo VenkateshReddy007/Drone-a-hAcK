@@ -1097,7 +1097,7 @@ def _track_a_ask_agent(question: str, upload_name: str, analyzed_df: pd.DataFram
     user_prompt = (
         f"Uploaded TCP dataset context:\n{context_json}\n\n"
         f"User question: {question}\n\n"
-        "Answer in 4-6 concise sentences. Reference the most relevant packet statistics, suspicious rows, or replay candidates when applicable."
+        "Answer in 4-6 complete concise sentences. Reference the most relevant packet statistics, suspicious rows, or replay candidates when applicable."
     )
     payload = {
         "systemInstruction": {"parts": [{"text": system_prompt}]},
@@ -1105,7 +1105,7 @@ def _track_a_ask_agent(question: str, upload_name: str, analyzed_df: pd.DataFram
         "generationConfig": {
             "temperature": 0.35,
             "topP": 0.95,
-            "maxOutputTokens": 350,
+            "maxOutputTokens": 512,
         },
     }
 
@@ -1123,7 +1123,13 @@ def _track_a_ask_agent(question: str, upload_name: str, analyzed_df: pd.DataFram
             if candidates:
                 parts = candidates[0].get("content", {}).get("parts", [])
                 text = "".join(part.get("text", "") for part in parts).strip()
-                if text:
+                truncated_endings = (" and", " or", " but", " because", ",", ":", "-")
+                looks_truncated = (
+                    len(text) < 60
+                    or not text.endswith((".", "!", "?"))
+                    or any(text.lower().endswith(ending) for ending in truncated_endings)
+                )
+                if text and not looks_truncated:
                     return text
         except urllib.error.HTTPError as error:
             if error.code != 404:
