@@ -1,0 +1,6 @@
+[server]
+maxUploadSize = 200
+maxMessageSize = 200
+
+[runner]
+fastReruns = true

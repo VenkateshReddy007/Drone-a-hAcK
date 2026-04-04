@@ -29,6 +29,9 @@ import pandas as pd
 BYTE_DURATION = 0.00008
 PACKET_GAP_THRESHOLD = BYTE_DURATION * 10.0
 CHUNK_SIZE = 10_000
+MAX_EXACT_PAIR_ROWS = 10_000
+MAX_NEAR_PAIR_ROWS = 5_000
+MAX_NEAR_GROUP_SIZE = 400
 
 OUTPUT_DASHBOARD = "uart_dashboard.png"
 OUTPUT_PACKETS = "packets_detected.csv"
@@ -285,12 +288,16 @@ def _packet_distribution(packets: pd.DataFrame) -> dict[str, float]:
 def _detect_repeated_packets(packets: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     exact_rows: list[dict[str, object]] = []
     near_rows: list[dict[str, object]] = []
+    exact_row_count = 0
+    near_row_count = 0
 
     for packet_hex, group in packets.groupby("packet_hex", sort=False):
         if len(group) < 2 or not packet_hex:
             continue
         ids = group["packet_id"].to_numpy(dtype=int)
-        for left, right in combinations(ids, 2):
+        # Keep representative exact matches without materializing all O(n^2) pairs.
+        sample_ids = ids[: min(len(ids), 24)]
+        for left, right in combinations(sample_ids, 2):
             exact_rows.append(
                 {
                     "packet_a": int(left),
@@ -301,12 +308,19 @@ def _detect_repeated_packets(packets: pd.DataFrame) -> tuple[pd.DataFrame, pd.Da
                     "packet_hex": packet_hex,
                 }
             )
+            exact_row_count += 1
+            if exact_row_count >= MAX_EXACT_PAIR_ROWS:
+                break
+        if exact_row_count >= MAX_EXACT_PAIR_ROWS:
+            break
 
     for length, group in packets.groupby("length_bytes", sort=False):
+        if near_row_count >= MAX_NEAR_PAIR_ROWS:
+            break
         if len(group) < 2 or length < 2:
             continue
-        if len(group) > 1500:
-            group = group.sort_values("packet_id").head(1500)
+        if len(group) > MAX_NEAR_GROUP_SIZE:
+            group = group.sort_values("packet_id").head(MAX_NEAR_GROUP_SIZE)
 
         payloads = [bytes.fromhex(value) for value in group["packet_hex"].tolist()]
         packet_ids = group["packet_id"].to_numpy(dtype=int)
@@ -320,6 +334,8 @@ def _detect_repeated_packets(packets: pd.DataFrame) -> tuple[pd.DataFrame, pd.Da
             buckets.setdefault(key, []).append(index)
 
         for indices in buckets.values():
+            if near_row_count >= MAX_NEAR_PAIR_ROWS:
+                break
             if len(indices) < 2:
                 continue
             for i, j in combinations(indices, 2):
@@ -339,6 +355,11 @@ def _detect_repeated_packets(packets: pd.DataFrame) -> tuple[pd.DataFrame, pd.Da
                             "packet_hex": f"{group.iloc[i]['packet_hex']}|{group.iloc[j]['packet_hex']}",
                         }
                     )
+                    near_row_count += 1
+                    if near_row_count >= MAX_NEAR_PAIR_ROWS:
+                        break
+            if near_row_count >= MAX_NEAR_PAIR_ROWS:
+                break
 
     exact_matches = pd.DataFrame.from_records(exact_rows)
     near_matches = pd.DataFrame.from_records(near_rows)
