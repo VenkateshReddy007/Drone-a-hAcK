@@ -469,7 +469,7 @@ def _build_dashboard(
         packets = packets.iloc[:: max(1, len(packets) // 15_000)].copy()
 
     plt.style.use("dark_background")
-    fig, axes = plt.subplots(3, 2, figsize=(20, 14), dpi=150)
+    fig, axes = plt.subplots(3, 2, figsize=(24, 16), dpi=150)
     fig.patch.set_facecolor(DARK_BG)
     axes = axes.flatten()
 

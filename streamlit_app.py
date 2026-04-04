@@ -1217,12 +1217,18 @@ def _run_uart_uploaded_analysis(uploaded_file) -> dict[str, object]:
         with contextlib.redirect_stdout(stdout_capture):
             analyze_uart_capture(input_path, tmp_path, fast_mode=True)
 
+        stable_artifact_dir = Path(tempfile.gettempdir()) / "qshield_uart_artifacts"
+        stable_artifact_dir.mkdir(parents=True, exist_ok=True)
+        dashboard_path = stable_artifact_dir / f"uart_dashboard_{file_hash}.png"
+        dashboard_path.write_bytes((tmp_path / "uart_dashboard.png").read_bytes())
+
         outputs = {
             "dashboard_name": "uart_dashboard.png",
+            "uart_dashboard_path": str(dashboard_path),
             "packets_name": "packets_detected.csv",
             "timing_name": "timing_anomalies.csv",
             "report_name": "uart_report.txt",
-            "dashboard_bytes": (tmp_path / "uart_dashboard.png").read_bytes(),
+            "dashboard_bytes": dashboard_path.read_bytes(),
             "packets_bytes": (tmp_path / "packets_detected.csv").read_bytes(),
             "timing_bytes": (tmp_path / "timing_anomalies.csv").read_bytes(),
             "report_text": (tmp_path / "uart_report.txt").read_text(encoding="utf-8", errors="replace"),
@@ -2195,7 +2201,7 @@ with uart_tab:
             st.success(f"Analysis complete for {uart_result['source_filename']}.")
 
             st.markdown('<div class="chart-frame">', unsafe_allow_html=True)
-            st.image(uart_result["dashboard_bytes"], caption="uart_dashboard.png", use_container_width=True)
+            st.image(uart_result["uart_dashboard_path"], caption="uart_dashboard.png", use_column_width=True)
             st.markdown("</div>", unsafe_allow_html=True)
 
             report_text = str(uart_result["report_text"])
