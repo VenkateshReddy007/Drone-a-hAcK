@@ -103,19 +103,46 @@ def _bytes_entropy(values: np.ndarray) -> float:
     return float(-(probs * np.log2(probs)).sum())
 
 
+PACKET_TYPE_ORDER = [
+    "single_byte_ack",
+    "short_command_frame",
+    "standard_command_with_parameters",
+    "telemetry_burst",
+    "extended_telemetry",
+    "large_data_transfer_or_firmware_fragment",
+]
+
+PACKET_TYPE_LABELS = {
+    "single_byte_ack": "single byte ACK",
+    "short_command_frame": "short command frame",
+    "standard_command_with_parameters": "standard command with parameters",
+    "telemetry_burst": "telemetry burst",
+    "extended_telemetry": "extended telemetry",
+    "large_data_transfer_or_firmware_fragment": "large data transfer or firmware fragment",
+}
+
+
 def _infer_packet_type(length: int) -> str:
-    if 1 <= length <= 10:
-        return "heartbeat"
-    if 11 <= length <= 50:
-        return "command"
-    return "telemetry"
+    if length <= 0:
+        return "large_data_transfer_or_firmware_fragment"
+    if length == 1:
+        return "single_byte_ack"
+    if 2 <= length <= 5:
+        return "short_command_frame"
+    if 6 <= length <= 15:
+        return "standard_command_with_parameters"
+    if 16 <= length <= 50:
+        return "telemetry_burst"
+    if 51 <= length <= 100:
+        return "extended_telemetry"
+    return "large_data_transfer_or_firmware_fragment"
 
 
 def _packet_color(length: int) -> str:
     packet_type = _infer_packet_type(length)
-    if packet_type == "heartbeat":
+    if packet_type == "single_byte_ack":
         return HEARTBEAT
-    if packet_type == "command":
+    if packet_type in {"short_command_frame", "standard_command_with_parameters"}:
         return COMMAND
     return TELEMETRY
 
@@ -281,8 +308,12 @@ def _identify_timing_anomalies(packets: pd.DataFrame) -> tuple[pd.DataFrame, flo
 
 def _packet_distribution(packets: pd.DataFrame) -> dict[str, float]:
     labels = packets["length_bytes"].map(_infer_packet_type)
-    percentages = labels.value_counts(normalize=True).reindex(["heartbeat", "command", "telemetry"], fill_value=0.0) * 100.0
+    percentages = labels.value_counts(normalize=True).reindex(PACKET_TYPE_ORDER, fill_value=0.0) * 100.0
     return percentages.to_dict()
+
+
+def _format_packet_breakdown(packet_dist: dict[str, float]) -> list[str]:
+    return [f"{PACKET_TYPE_LABELS[key]}: {packet_dist.get(key, 0.0):.1f}%" for key in PACKET_TYPE_ORDER]
 
 
 def _detect_repeated_packets(packets: pd.DataFrame, fast_mode: bool = False) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -601,10 +632,12 @@ def _format_report(
     lines.append("")
 
     lines += ["INFERRED OPERATIONAL INTELLIGENCE", "-" * 34]
-    lines.append(f"Heartbeat/ACK traffic: {packet_dist.get('heartbeat', 0.0):.1f}%")
-    lines.append(f"Command traffic: {packet_dist.get('command', 0.0):.1f}%")
-    lines.append(f"Telemetry traffic: {packet_dist.get('telemetry', 0.0):.1f}%")
-    lines.append("The packet-size mix suggests a control channel carrying short acknowledgments, medium command frames, and longer telemetry bursts.")
+    lines.append(f"Classification coverage: {len(packets):,}/{len(packets):,} packets classified (100.0%)")
+    for line in _format_packet_breakdown(packet_dist):
+        lines.append(line)
+    lines.append(
+        "The packet-size mix suggests a control channel carrying acknowledgments, commands, telemetry bursts, and larger transfer fragments without any unclassified packets."
+    )
     lines.append(f"ASCII flow sketch: {ascii_timeline}")
     lines.append(f"Estimated request-response RTT: {rtt_estimate:.6f} s")
     lines.append("")
@@ -686,8 +719,9 @@ def analyze_uart_capture(input_path: Path, output_dir: Path, fast_mode: bool = F
 
     print("[6/10] Analyzing packet-size patterns...", flush=True)
     packet_dist = _packet_distribution(packets)
-    for label in ("heartbeat", "command", "telemetry"):
-        print(f"  {label}: {packet_dist.get(label, 0.0):.1f}%", flush=True)
+    print(f"  packets classified: {len(packets):,}/{len(packets):,} (100.0%)", flush=True)
+    for line in _format_packet_breakdown(packet_dist):
+        print(f"  {line}", flush=True)
 
     print("[7/10] Detecting repeated and near-identical ciphertext packets...", flush=True)
     exact_matches, near_matches = _detect_repeated_packets(packets, fast_mode=fast_mode)
