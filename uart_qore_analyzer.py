@@ -242,7 +242,7 @@ def _identify_timing_anomalies(packets: pd.DataFrame) -> tuple[pd.DataFrame, flo
     for row in packets.loc[key_mask, ["packet_id", "session_id", "start_time", "gap_before", "length_bytes"]].itertuples(index=False):
         events.append(
             {
-                "event_type": "key_exchange_candidate",
+                "event_type": "KEY_EXCHANGE_CANDIDATE",
                 "packet_id": int(row.packet_id),
                 "session_id": int(row.session_id),
                 "start_time": float(row.start_time),
@@ -260,7 +260,7 @@ def _identify_timing_anomalies(packets: pd.DataFrame) -> tuple[pd.DataFrame, flo
     for row in packets.loc[replay_mask, ["packet_id", "session_id", "start_time", "gap_before", "length_bytes"]].itertuples(index=False):
         events.append(
             {
-                "event_type": "replay_attack_candidate",
+                "event_type": "BURST_REPLAY_CANDIDATE",
                 "packet_id": int(row.packet_id),
                 "session_id": int(row.session_id),
                 "start_time": float(row.start_time),
