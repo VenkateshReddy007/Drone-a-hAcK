@@ -2420,14 +2420,3 @@ st.markdown(
         unsafe_allow_html=True,
 )
 
-st.markdown(
-        """
-        <div class="footer-wrap">
-            <div class="footer-line"></div>
-            Developed for 515 Army Base Workshop | Operation Crack The Uncrackable | April 4 2026<br/>
-            Powered by QSHIELD v1.0 | Securing India's Skies
-        </div>
-        """,
-        unsafe_allow_html=True,
-)
-
