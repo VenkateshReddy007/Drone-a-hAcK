@@ -6,6 +6,8 @@ import json
 import os
 import tempfile
 import hashlib
+import io
+import contextlib
 from collections import Counter
 from html import escape
 from datetime import datetime, timedelta, timezone
@@ -1144,6 +1146,94 @@ def _track_a_ask_agent(question: str, upload_name: str, analyzed_df: pd.DataFram
     return _track_a_local_answer(question, analyzed_df, replay_df)
 
 
+def _extract_uart_attack_scores(report_text: str) -> list[dict[str, str]]:
+    scores: list[dict[str, str]] = []
+    in_section = False
+    for raw_line in report_text.splitlines():
+        line = raw_line.strip()
+        if line == "IDENTIFIED VULNERABILITIES":
+            in_section = True
+            continue
+        if in_section and not line:
+            if scores:
+                break
+            continue
+        if in_section and line.startswith("DEFENCE RECOMMENDATIONS"):
+            break
+        if in_section and line.startswith("-") and "[" in line and "]" in line:
+            # Expected format: - Vector Name [HIGH] - Justification
+            left, _, right = line[1:].partition("-")
+            left = left.strip()
+            justification = right.strip()
+            if "[" in left and "]" in left:
+                vector = left[: left.rfind("[")].strip()
+                severity = left[left.rfind("[") + 1 : left.rfind("]")].strip().upper()
+                if severity in {"HIGH", "MEDIUM", "LOW"} and vector:
+                    scores.append(
+                        {
+                            "vector": vector,
+                            "severity": severity,
+                            "justification": justification,
+                        }
+                    )
+        if len(scores) >= 6:
+            break
+    return scores
+
+
+def _uart_score_card(vector: str, severity: str, justification: str) -> str:
+    palette = {
+        "HIGH": ("#3b1111", "#ff4d4d", "#ffd2d2"),
+        "MEDIUM": ("#3b2a11", "#ffb347", "#ffe5bd"),
+        "LOW": ("#10321f", "#3ddc84", "#d4ffe7"),
+    }
+    bg, border, text = palette.get(severity, ("#142033", "#3b82f6", "#d8e7ff"))
+    return f"""
+    <div class=\"ops-card\" style=\"background:{bg}; border:1px solid {border};\">
+        <div style=\"display:flex; justify-content:space-between; align-items:center; gap:0.5rem;\">
+            <div class=\"scope-title\" style=\"margin:0;\">{escape(vector)}</div>
+            <div style=\"font-weight:900; color:{border}; letter-spacing:0.08em;\">{escape(severity)}</div>
+        </div>
+        <div style=\"margin-top:0.35rem; color:{text}; line-height:1.45; font-size:0.9rem;\">{escape(justification)}</div>
+    </div>
+    """
+
+
+def _run_uart_uploaded_analysis(uploaded_file) -> dict[str, object]:
+    from uart_qore_analyzer import analyze_uart_capture
+
+    file_bytes = uploaded_file.getvalue()
+    file_hash = hashlib.sha256(file_bytes).hexdigest()
+    cache = st.session_state.setdefault("uart_analysis_cache", {})
+    if file_hash in cache:
+        return cache[file_hash]
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        input_path = tmp_path / "encrypted.csv"
+        input_path.write_bytes(file_bytes)
+
+        stdout_capture = io.StringIO()
+        with contextlib.redirect_stdout(stdout_capture):
+            analyze_uart_capture(input_path, tmp_path)
+
+        outputs = {
+            "dashboard_name": "uart_dashboard.png",
+            "packets_name": "packets_detected.csv",
+            "timing_name": "timing_anomalies.csv",
+            "report_name": "uart_report.txt",
+            "dashboard_bytes": (tmp_path / "uart_dashboard.png").read_bytes(),
+            "packets_bytes": (tmp_path / "packets_detected.csv").read_bytes(),
+            "timing_bytes": (tmp_path / "timing_anomalies.csv").read_bytes(),
+            "report_text": (tmp_path / "uart_report.txt").read_text(encoding="utf-8", errors="replace"),
+            "log_text": stdout_capture.getvalue(),
+            "source_filename": uploaded_file.name,
+            "source_hash": file_hash,
+        }
+    cache[file_hash] = outputs
+    return outputs
+
+
 def _at(total_packets: int, frac: float) -> int:
     return max(3, min(total_packets - 2, int(round(total_packets * frac))))
 
@@ -2085,6 +2175,94 @@ if track_a_upload is not None:
             """,
             unsafe_allow_html=True,
         )
+
+st.divider()
+_section_title("TRACK A - ENCRYPTED UART ANALYSIS", "Upload encrypted.csv (1 byte per UART row) and auto-run full QNu Qore metadata intelligence workflow")
+
+uart_tab = st.tabs(["TRACK A — ENCRYPTED UART ANALYSIS"])[0]
+with uart_tab:
+    uart_upload = st.file_uploader(
+        "Upload encrypted UART CSV",
+        type=["csv"],
+        key="track_a_uart_upload",
+    )
+
+    if uart_upload is not None:
+        try:
+            with st.spinner("Running 10-step encrypted UART intelligence analysis..."):
+                uart_result = _run_uart_uploaded_analysis(uart_upload)
+
+            st.success(f"Analysis complete for {uart_result['source_filename']}.")
+
+            st.markdown('<div class="chart-frame">', unsafe_allow_html=True)
+            st.image(uart_result["dashboard_bytes"], caption="uart_dashboard.png", use_container_width=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+
+            report_text = str(uart_result["report_text"])
+            attack_scores = _extract_uart_attack_scores(report_text)
+            if attack_scores:
+                _section_title("Attack Vector Scores", "Metadata-only feasibility ranking from UART analysis output")
+                score_cols = st.columns(3)
+                for index, item in enumerate(attack_scores):
+                    score_cols[index % 3].markdown(
+                        _uart_score_card(item["vector"], item["severity"], item["justification"]),
+                        unsafe_allow_html=True,
+                    )
+
+            st.markdown(
+                f"""
+                <div class="ops-card" style="border-left:5px solid #ff9933;">
+                    <div class="scope-title">Military Intelligence Report</div>
+                    <div style="white-space:pre-wrap; line-height:1.5; font-size:0.92rem; margin-top:0.4rem;">{escape(report_text)}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            st.markdown('<div class="ops-card"><div class="scope-title">Download Analysis Artifacts</div></div>', unsafe_allow_html=True)
+            dl_cols = st.columns(4)
+            dl_cols[0].download_button(
+                "Download uart_dashboard.png",
+                data=uart_result["dashboard_bytes"],
+                file_name=uart_result["dashboard_name"],
+                mime="image/png",
+                key=f"uart_dl_dashboard_{uart_result['source_hash']}",
+            )
+            dl_cols[1].download_button(
+                "Download packets_detected.csv",
+                data=uart_result["packets_bytes"],
+                file_name=uart_result["packets_name"],
+                mime="text/csv",
+                key=f"uart_dl_packets_{uart_result['source_hash']}",
+            )
+            dl_cols[2].download_button(
+                "Download timing_anomalies.csv",
+                data=uart_result["timing_bytes"],
+                file_name=uart_result["timing_name"],
+                mime="text/csv",
+                key=f"uart_dl_timing_{uart_result['source_hash']}",
+            )
+            dl_cols[3].download_button(
+                "Download uart_report.txt",
+                data=report_text.encode("utf-8"),
+                file_name=uart_result["report_name"],
+                mime="text/plain",
+                key=f"uart_dl_report_{uart_result['source_hash']}",
+            )
+
+            with st.expander("View analysis execution log"):
+                st.code(str(uart_result["log_text"]).strip() or "No analyzer log output captured.", language="text")
+        except Exception as uart_error:
+            st.markdown(
+                f"""
+                <div class="ops-card" style="border-left:5px solid #ff3333;">
+                    <div class="scope-title" style="color:#ff3333;">TRACK A UART Analysis Error</div>
+                    <div style="white-space:pre-wrap; line-height:1.55;">{escape(str(uart_error))}</div>
+                    <div style="margin-top:0.4rem; color:#b8c9db; font-size:12px;">Ensure the file is CSV with per-byte rows and includes start_time, duration, and data columns.</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
 show_composite = st.toggle("Show command-center composite image", value=False)
 if show_composite:
